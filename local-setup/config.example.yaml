@@ -1,0 +1,214 @@
+# Backuparr Configuration Example
+# This file provides example configurations for Backuparr.
+# Copy to config.yaml and customize for your environment.
+
+backuparr:
+  # Maximum number of concurrent backup operations
+  # Recommended: 2-5 depending on available resources
+  maxConcurrentBackups: 3
+
+  # Temporary directory for downloading backups before uploading to S3
+  # Must be writable by the application
+  # Recommend using a volume mount in Kubernetes/Docker
+  tempDirectory: /tmp/backuparr
+
+  # Health check HTTP server configuration
+  # Used by Kubernetes liveness and readiness probes
+  healthCheck:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8080
+
+  # Logging configuration
+  logging:
+    level: INFO  # Options: TRACE, DEBUG, INFO, WARN, ERROR
+
+# S3-compatible storage buckets
+# Define one or more buckets for backup storage
+# Supports: AWS S3, MinIO, Backblaze B2, Wasabi, etc.
+s3Buckets:
+  # Primary backup bucket (MinIO example)
+  - name: primary
+    provider: Minio  # Options: Aws, Minio, Backblaze, Wasabi, Other
+    endpoint: http://minio:9000
+    region: us-east-1
+    bucketName: backups
+    # Credentials can use environment variable substitution
+    accessKeyId: ${MINIO_ACCESS_KEY}
+    secretAccessKey: ${MINIO_SECRET_KEY}
+    pathStyleAccess: true  # Required for MinIO and some S3-compatible services
+
+  # Secondary backup bucket (AWS S3 example)
+  # - name: aws-backup
+  #   provider: Aws
+  #   region: us-west-2
+  #   bucketName: my-arr-backups
+  #   accessKeyId: ${AWS_ACCESS_KEY_ID}
+  #   secretAccessKey: ${AWS_SECRET_ACCESS_KEY}
+  #   pathStyleAccess: false
+
+  # Backblaze B2 example
+  # - name: b2-backup
+  #   provider: Backblaze
+  #   endpoint: https://s3.us-west-002.backblazeb2.com
+  #   region: us-west-002
+  #   bucketName: my-b2-bucket
+  #   accessKeyId: ${B2_KEY_ID}
+  #   secretAccessKey: ${B2_APPLICATION_KEY}
+  #   pathStyleAccess: false
+
+# Application instances to backup
+instances:
+  # Sonarr backup configuration
+  - name: sonarr
+    arrType: Sonarr
+    url: http://sonarr:8989
+    apiKey: ${SONARR_API_KEY}
+    s3Bucket: primary  # Must match a bucket name from s3Buckets
+    s3Prefix: sonarr/  # Optional: prefix for S3 keys (creates folder structure)
+    schedule: "0 2 * * *"  # Daily at 2 AM (cron format: minute hour day month weekday)
+    retentionPolicy:
+      keepLast: 7        # Keep last 7 backups
+      keepDaily: 14      # Keep daily backups for 14 days
+      keepWeekly: 8      # Keep weekly backups for 8 weeks
+      keepMonthly: 6     # Keep monthly backups for 6 months
+      keepYearly: 2      # Keep yearly backups for 2 years
+
+  # Radarr backup configuration
+  - name: radarr
+    arrType: Radarr
+    url: http://radarr:7878
+    apiKey: ${RADARR_API_KEY}
+    s3Bucket: primary
+    s3Prefix: radarr/
+    schedule: "0 3 * * *"  # Daily at 3 AM
+    retentionPolicy:
+      keepLast: 7
+      keepDaily: 14
+      keepWeekly: 8
+      keepMonthly: 6
+
+  # Lidarr backup configuration
+  - name: lidarr
+    arrType: Lidarr
+    url: http://lidarr:8686
+    apiKey: ${LIDARR_API_KEY}
+    s3Bucket: primary
+    s3Prefix: lidarr/
+    schedule: "0 4 * * *"  # Daily at 4 AM
+    retentionPolicy:
+      keepLast: 5
+      keepDaily: 7
+      keepWeekly: 4
+
+  # Readarr backup configuration
+  # - name: readarr
+  #   arrType: Readarr
+  #   url: http://readarr:8787
+  #   apiKey: ${READARR_API_KEY}
+  #   s3Bucket: primary
+  #   s3Prefix: readarr/
+  #   schedule: "0 5 * * *"  # Daily at 5 AM
+  #   retentionPolicy:
+  #     keepLast: 5
+  #     keepDaily: 7
+
+  # Prowlarr backup configuration
+  # - name: prowlarr
+  #   arrType: Prowlarr
+  #   url: http://prowlarr:9696
+  #   apiKey: ${PROWLARR_API_KEY}
+  #   s3Bucket: primary
+  #   s3Prefix: prowlarr/
+  #   schedule: "0 6 * * *"  # Daily at 6 AM
+  #   retentionPolicy:
+  #     keepLast: 5
+  #     keepDaily: 7
+
+  # Whisparr backup configuration
+  # - name: whisparr
+  #   arrType: Whisparr
+  #   url: http://whisparr:6969
+  #   apiKey: ${WHISPARR_API_KEY}
+  #   s3Bucket: primary
+  #   s3Prefix: whisparr/
+  #   schedule: "0 7 * * *"  # Daily at 7 AM
+  #   retentionPolicy:
+  #     keepLast: 5
+  #     keepDaily: 7
+
+# ========================================
+# Schedule Examples (cron format)
+# ========================================
+# Field order: minute hour day-of-month month day-of-week
+# 
+# Examples:
+# "0 2 * * *"        - Daily at 2:00 AM
+# "*/15 * * * *"     - Every 15 minutes
+# "0 */6 * * *"      - Every 6 hours
+# "0 0 * * 0"        - Weekly on Sunday at midnight
+# "0 0 1 * *"        - Monthly on the 1st at midnight
+# "0 0 1 1 *"        - Yearly on January 1st at midnight
+# "0 2,14 * * *"     - Daily at 2 AM and 2 PM
+# "0 2 * * 1-5"      - Weekdays at 2 AM
+# "0 3 1-7 * 1"      - First Monday of each month at 3 AM
+#
+# ========================================
+# Retention Policy Notes
+# ========================================
+# Retention policies work together (union semantics):
+# - keepLast: Always keep the N most recent backups
+# - keepDaily: Keep one backup per day for N days
+# - keepWeekly: Keep one backup per week for N weeks
+# - keepMonthly: Keep one backup per month for N months
+# - keepYearly: Keep one backup per year for N years
+#
+# A backup matching multiple rules is kept (e.g., a backup
+# can be both "last 7" and "daily for 14 days").
+#
+# All fields are optional. Use only what you need:
+# - Just keepLast: Simple "keep last N backups"
+# - Combined: Comprehensive grandfather-father-son rotation
+#
+# ========================================
+# Environment Variables
+# ========================================
+# Use ${VAR_NAME} syntax to reference environment variables.
+# This is recommended for sensitive data like API keys.
+#
+# Example Kubernetes Secret:
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: backuparr-secrets
+# type: Opaque
+# stringData:
+#   SONARR_API_KEY: "your-sonarr-api-key"
+#   RADARR_API_KEY: "your-radarr-api-key"
+#   MINIO_ACCESS_KEY: "your-minio-access-key"
+#   MINIO_SECRET_KEY: "your-minio-secret-key"
+#
+# ========================================
+# Kubernetes Deployment
+# ========================================
+# Health check endpoints (for probes):
+# - Liveness:  GET http://localhost:8080/health/live
+# - Readiness: GET http://localhost:8080/health/ready
+# - Status:    GET http://localhost:8080/health/status
+#
+# Example liveness probe:
+# livenessProbe:
+#   httpGet:
+#     path: /health/live
+#     port: 8080
+#   initialDelaySeconds: 30
+#   periodSeconds: 10
+#
+# Example readiness probe:
+# readinessProbe:
+#   httpGet:
+#     path: /health/ready
+#     port: 8080
+#   initialDelaySeconds: 10
+#   periodSeconds: 5
+

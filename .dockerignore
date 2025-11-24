@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# SBT
+target/
+project/target/
+project/project/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.bsp/
+.metals/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test data
+test-data/
+
+# Documentation (copied separately if needed)
+docs/
+*.md
+!README.md
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# CI/CD
+.github/
+
+# Temporary files
+*.tmp
+*.swp
+*~
