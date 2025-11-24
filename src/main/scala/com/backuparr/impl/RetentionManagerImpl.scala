@@ -42,6 +42,24 @@ class RetentionManagerImpl[F[_]: Async](
     policy: RetentionPolicyConfig,
     instanceName: String
   ): F[RetentionResult] =
+    applyRetentionAt(bucket, policy, instanceName, Instant.now())
+  
+  /**
+   * Apply retention policy with a specific timestamp for "now".
+   * This is primarily for testing, but can also be used for backdated retention.
+   * 
+   * @param bucket S3 bucket configuration
+   * @param policy Retention policy to apply
+   * @param instanceName Instance name (used as prefix)
+   * @param now The timestamp to use as "current time" for retention calculations
+   * @return Result containing kept/deleted backups and any errors
+   */
+  def applyRetentionAt(
+    bucket: S3BucketConfig,
+    policy: RetentionPolicyConfig,
+    instanceName: String,
+    now: Instant
+  ): F[RetentionResult] =
     for
       _ <- logger.info(s"Applying retention policy for instance: $instanceName")
       _ <- logger.debug(s"Policy: keepLast=${policy.keepLast}, keepDaily=${policy.keepDaily}, " +
@@ -57,7 +75,7 @@ class RetentionManagerImpl[F[_]: Async](
       sortedBackups = allBackups.sortBy(_.lastModified.toEpochMilli).reverse
       
       // Determine which backups to keep
-      toKeep = evaluateRetentionPolicy(sortedBackups, policy)
+      toKeep = evaluateRetentionPolicy(sortedBackups, policy, now)
       toDelete = sortedBackups.filterNot(backup => toKeep.contains(backup))
       
       _ <- logger.info(s"Retention evaluation: ${toKeep.size} to keep, ${toDelete.size} to delete")
@@ -93,13 +111,17 @@ class RetentionManagerImpl[F[_]: Async](
    * 
    * A backup is kept if it matches ANY of the retention rules.
    * This prevents accidental deletion of important backups.
+   * 
+   * @param backups List of backups sorted by lastModified (newest first)
+   * @param policy Retention policy configuration
+   * @param now The timestamp to use as "current time" for retention calculations
+   * @return List of backups that should be kept
    */
   private def evaluateRetentionPolicy(
     backups: List[S3Object],
-    policy: RetentionPolicyConfig
+    policy: RetentionPolicyConfig,
+    now: Instant
   ): List[S3Object] =
-    val now = Instant.now()
-    
     // Determine which backups match each retention rule
     val keepLastBackups = policy.keepLast.fold(Set.empty[S3Object]) { n =>
       backups.take(n).toSet
@@ -133,7 +155,7 @@ class RetentionManagerImpl[F[_]: Async](
     now: Instant,
     days: Int
   ): Set[S3Object] =
-    val cutoffDate = LocalDate.ofInstant(now, ZoneOffset.UTC).minusDays(days)
+    val cutoffDate = LocalDate.ofInstant(now, ZoneOffset.UTC).minusDays(days - 1)
     
     backups
       .filter { backup =>
@@ -157,7 +179,7 @@ class RetentionManagerImpl[F[_]: Async](
     now: Instant,
     weeks: Int
   ): Set[S3Object] =
-    val cutoffDate = LocalDate.ofInstant(now, ZoneOffset.UTC).minusWeeks(weeks)
+    val cutoffDate = LocalDate.ofInstant(now, ZoneOffset.UTC).minusWeeks(weeks - 1)
     
     backups
       .filter { backup =>
@@ -184,7 +206,7 @@ class RetentionManagerImpl[F[_]: Async](
     now: Instant,
     months: Int
   ): Set[S3Object] =
-    val cutoffDate = LocalDate.ofInstant(now, ZoneOffset.UTC).minusMonths(months)
+    val cutoffDate = LocalDate.ofInstant(now, ZoneOffset.UTC).minusMonths(months - 1)
     
     backups
       .filter { backup =>
