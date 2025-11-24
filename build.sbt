@@ -110,7 +110,7 @@ lazy val integrationTest = taskKey[Unit]("Run integration tests with docker-comp
 dockerComposeUp := {
   val log = streams.value.log
   log.info("Starting docker-compose test environment...")
-  val exitCode = s"docker-compose -f $dockerComposeFile up -d".!
+  val exitCode = s"docker compose -f $dockerComposeFile up -d".!
   if (exitCode != 0) {
     sys.error("Failed to start docker-compose")
   }
@@ -120,7 +120,7 @@ dockerComposeUp := {
 dockerComposeDown := {
   val log = streams.value.log
   log.info("Stopping docker-compose test environment...")
-  val exitCode = s"docker-compose -f $dockerComposeFile down".!
+  val exitCode = s"docker compose -f $dockerComposeFile down".!
   if (exitCode == 0) {
     log.info("Docker-compose stopped successfully")
   } else {
@@ -131,7 +131,7 @@ dockerComposeDown := {
 dockerComposeLogs := {
   val log = streams.value.log
   log.info("Showing docker-compose logs...")
-  s"docker-compose -f $dockerComposeFile logs --tail=50".!
+  s"docker compose -f $dockerComposeFile logs --tail=50".!
 }
 
 getApiKeys := {
@@ -209,7 +209,7 @@ dockerComposeWaitHealthy := {
     attempt += 1
     Thread.sleep(5000) // Wait 5 seconds between checks
     
-    val healthStatus = s"docker-compose -f $dockerComposeFile ps --format json".!!
+    val healthStatus = s"docker compose -f $dockerComposeFile ps --format json".!!
     val allRunning = healthStatus.contains("\"State\":\"running\"")
     
     if (allRunning) {
