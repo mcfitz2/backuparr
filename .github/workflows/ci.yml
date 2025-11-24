@@ -49,9 +49,6 @@ jobs:
       - name: Run unit tests
         run: sbt "testOnly -- --exclude-tags=integration"
 
-      - name: Check code formatting
-        run: sbt scalafmtCheck || true
-
   # Job 2: Integration tests (requires Docker)
   integration-test:
     name: Integration Tests
