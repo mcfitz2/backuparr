@@ -101,6 +101,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'sbt'
+
+      - name: Cache SBT
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.sbt
+            ~/.ivy2/cache
+            ~/.coursier
+          key: ${{ runner.os }}-sbt-${{ hashFiles('**/build.sbt', 'project/**') }}
+          restore-keys: |
+            ${{ runner.os }}-sbt-
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
