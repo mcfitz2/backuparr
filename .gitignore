@@ -32,4 +32,5 @@ logs/
 # Configuration files with secrets
 local-setup/config.yaml
 local-setup/minio-creds.yaml
-local-setup/s3-credentials.yaml
+local-setup/s3-credentials.yamllocal-setup/*-api-key
+k8s/

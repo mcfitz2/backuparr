@@ -46,14 +46,18 @@ docker-compose -f test-setup/docker-compose.yml down -v
 
 ## Services
 
-All services run on localhost:
+All services run on localhost with URL base paths configured (matching production reverse proxy scenarios):
 
 - **MinIO**: http://localhost:9000 (Console: http://localhost:9001)
   - Access Key: `minioadmin`
   - Secret Key: `minioadmin`
-- **Sonarr**: http://localhost:8989
-- **Radarr**: http://localhost:7878
-- **Lidarr**: http://localhost:8686
-- **Prowlarr**: http://localhost:9696
+- **Sonarr**: http://localhost:8989/sonarr
+- **Radarr**: http://localhost:7878/radarr
+- **Lidarr**: http://localhost:8686/lidarr
+- **Prowlarr**: http://localhost:9696/prowlarr
+
+**Note**: All *arr instances are configured with URL base paths using the `URL_BASE` environment variable.
+This matches real-world production deployments where instances run behind reverse proxies (e.g., Nginx, Traefik).
+The integration tests verify that Backuparr correctly handles URL redirects and includes base paths in API calls.
 
 API keys are automatically extracted by the test suite.

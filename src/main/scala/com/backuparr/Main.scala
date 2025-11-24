@@ -7,6 +7,7 @@ import com.backuparr.config.{BackuparrConfig, ConfigLoader}
 import com.backuparr.http.HealthCheckServer
 import com.backuparr.impl.{BackupManagerImpl, HealthCheckImpl, SchedulerImpl, S3ClientAwsSdk}
 import org.http4s.ember.client.EmberClientBuilder
+import org.http4s.client.middleware.FollowRedirect
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
@@ -79,8 +80,12 @@ object Main extends IOApp:
       s3BucketMap = config.s3Buckets.map(b => b.name -> b).toMap
       
       // Initialize HTTP client (shared across all *arr instances)
+      // Configure to follow redirects for *arr instances using URL base paths
       _ <- Resource.eval(logger.info("Initializing HTTP client"))
-      httpClient <- EmberClientBuilder.default[IO].build
+      baseHttpClient <- EmberClientBuilder
+        .default[IO]
+        .build
+      httpClient = FollowRedirect(maxRedirects = 3)(baseHttpClient)
       
       // Initialize all S3 clients (one per bucket)
       _ <- Resource.eval(logger.info("Initializing S3 clients"))

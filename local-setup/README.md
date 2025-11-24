@@ -9,6 +9,7 @@ This directory contains configuration files and Docker Compose setup for local d
 - **docker-compose.yml** - Docker Compose for local development
 - **minio-creds.yaml** - MinIO S3 credentials (git ignored)
 - **s3-credentials.example.yaml** - Example S3 credentials template
+- **\*-api-key** - API key files (git ignored, one per *arr instance)
 
 ## Quick Start
 
@@ -24,10 +25,19 @@ This directory contains configuration files and Docker Compose setup for local d
    docker-compose up -d
    ```
 
-3. Get API keys from each *arr service:
+3. Get API keys from each *arr service and save to files:
    - Sonarr: http://localhost:8989/settings/general
+     ```bash
+     echo "YOUR_SONARR_API_KEY" > sonarr-api-key
+     ```
    - Radarr: http://localhost:7878/settings/general
+     ```bash
+     echo "YOUR_RADARR_API_KEY" > radarr-api-key
+     ```
    - Lidarr: http://localhost:8686/settings/general
+     ```bash
+     echo "YOUR_LIDARR_API_KEY" > lidarr-api-key
+     ```
 
 4. Update `config.yaml` with your API keys
 

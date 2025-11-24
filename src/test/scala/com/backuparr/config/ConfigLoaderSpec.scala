@@ -34,7 +34,7 @@ class ConfigLoaderSpec extends CatsEffectSuite:
       |  - name: sonarr-test
       |    arrType: sonarr
       |    url: http://sonarr:8989
-      |    apiKey: test-key
+      |    apiKeyFile: /tmp/test-key
       |    schedule: "0 2 * * *"
       |    s3BucketName: test-bucket
       |    retentionPolicy:
@@ -71,7 +71,7 @@ class ConfigLoaderSpec extends CatsEffectSuite:
       assertEquals(instance.name, "sonarr-test")
       assertEquals(instance.arrType, ArrType.Sonarr)
       assertEquals(instance.url, "http://sonarr:8989")
-      assertEquals(instance.apiKey, Some("test-key"))
+      assertEquals(instance.apiKeyFile, "/tmp/test-key")
       assertEquals(instance.schedule, "0 2 * * *")
       assertEquals(instance.s3BucketName, "test-bucket")
       
@@ -96,7 +96,7 @@ class ConfigLoaderSpec extends CatsEffectSuite:
           name = "duplicate",
           arrType = ArrType.Sonarr,
           url = "http://sonarr1:8989",
-          apiKey = Some("key1"),
+          apiKeyFile = "/tmp/key1",
           schedule = "0 2 * * *",
           s3BucketName = "bucket1",
           retentionPolicy = RetentionPolicyConfig(keepLast = Some(7))
@@ -105,7 +105,7 @@ class ConfigLoaderSpec extends CatsEffectSuite:
           name = "duplicate",  // Same name!
           arrType = ArrType.Radarr,
           url = "http://radarr:7878",
-          apiKey = Some("key2"),
+          apiKeyFile = "/tmp/key2",
           schedule = "0 3 * * *",
           s3BucketName = "bucket2",
           retentionPolicy = RetentionPolicyConfig(keepLast = Some(7))
@@ -125,7 +125,7 @@ class ConfigLoaderSpec extends CatsEffectSuite:
           name = "test",
           arrType = ArrType.Sonarr,
           url = "http://sonarr:8989",
-          apiKey = Some("key"),
+          apiKeyFile = "/tmp/key",
           schedule = "0 2 * * *",
           s3BucketName = "non-existent-bucket",  // This bucket doesn't exist!
           retentionPolicy = RetentionPolicyConfig(keepLast = Some(7))

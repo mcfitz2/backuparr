@@ -127,15 +127,19 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   ): IO[ArrInstanceConfig] =
     IO.delay(sys.props.get(envVar).orElse(sys.env.get(envVar))) flatMap {
       case Some(apiKey) =>
-        IO.pure(ArrInstanceConfig(
-          name = name,
-          arrType = arrType,
-          url = url,
-          apiKey = Some(apiKey),
-          schedule = "0 2 * * *",
-          s3BucketName = testBucket.name,
-          retentionPolicy = RetentionPolicyConfig(keepLast = Some(5))
-        ))
+        // Write API key to a temp file
+        val tempFile = Files.createTempFile(s"backuparr-test-$name-", ".key")
+        tempFile.toFile.deleteOnExit()
+        IO.delay(Files.writeString(tempFile, apiKey)).as:
+          ArrInstanceConfig(
+            name = name,
+            arrType = arrType,
+            url = url,
+            apiKeyFile = tempFile.toString,
+            schedule = "0 2 * * *",
+            s3BucketName = testBucket.name,
+            retentionPolicy = RetentionPolicyConfig(keepLast = Some(5))
+          )
       case None =>
         IO.raiseError(
           new RuntimeException(
@@ -209,7 +213,7 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   test("Sonarr - complete backup workflow".tag(integrationTag)) {
     for
       // Get configuration
-      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
       
       // Clean up any existing backups
       _ <- cleanupS3Backups(config.name)
@@ -242,7 +246,7 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   
   test("Radarr - complete backup workflow".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("radarr-test", ArrType.Radarr, "http://localhost:7878", "RADARR_API_KEY")
+      config <- getInstanceConfig("radarr-test", ArrType.Radarr, "http://localhost:7878/radarr", "RADARR_API_KEY")
       _ <- cleanupS3Backups(config.name)
       
       manager <- makeBackupManager
@@ -263,7 +267,7 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   
   test("Lidarr - complete backup workflow".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("lidarr-test", ArrType.Lidarr, "http://localhost:8686", "LIDARR_API_KEY")
+      config <- getInstanceConfig("lidarr-test", ArrType.Lidarr, "http://localhost:8686/lidarr", "LIDARR_API_KEY")
       _ <- cleanupS3Backups(config.name)
       
       manager <- makeBackupManager
@@ -310,7 +314,7 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   test("Retention policy - keep last N backups".tag(integrationTag)) {
     for
       // Create config with keepLast = 3
-      config <- getInstanceConfig("sonarr-retention", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-retention", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
       configWithRetention = config.copy(
         retentionPolicy = RetentionPolicyConfig(keepLast = Some(3))
       )
@@ -345,8 +349,8 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   test("Multiple instances - concurrent backups".tag(integrationTag)) {
     for
       // Get configs for multiple instances
-      sonarrConfig <- getInstanceConfig("sonarr-concurrent", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
-      radarrConfig <- getInstanceConfig("radarr-concurrent", ArrType.Radarr, "http://localhost:7878", "RADARR_API_KEY")
+      sonarrConfig <- getInstanceConfig("sonarr-concurrent", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
+      radarrConfig <- getInstanceConfig("radarr-concurrent", ArrType.Radarr, "http://localhost:7878/radarr", "RADARR_API_KEY")
       
       _ <- cleanupS3Backups(sonarrConfig.name)
       _ <- cleanupS3Backups(radarrConfig.name)
@@ -377,7 +381,7 @@ class BackupManagerIntegrationSpec extends CatsEffectSuite:
   
   test("Status tracking - multiple backups".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("sonarr-status", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-status", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
       _ <- cleanupS3Backups(config.name)
       
       manager <- makeBackupManager

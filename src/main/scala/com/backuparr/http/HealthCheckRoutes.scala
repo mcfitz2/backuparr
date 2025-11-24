@@ -15,9 +15,9 @@ import java.time.Instant
  * HTTP routes for health check endpoints.
  * 
  * Provides three endpoints:
- * - GET /health/live - Liveness probe (Kubernetes)
- * - GET /health/ready - Readiness probe (Kubernetes)
- * - GET /health/status - Detailed status (monitoring)
+ * - GET /health - Liveness probe (Kubernetes)
+ * - GET /ready - Readiness probe (Kubernetes)
+ * - GET /status - Detailed status (monitoring)
  */
 object HealthCheckRoutes:
   
@@ -34,7 +34,7 @@ object HealthCheckRoutes:
     HttpRoutes.of[F] {
       
       // Liveness probe - always returns 200 if application is alive
-      case GET -> Root / "health" / "live" =>
+      case GET -> Root / "health" =>
         healthCheck.liveness.flatMap { status =>
           if status.alive then
             Ok(status.asJson)
@@ -43,7 +43,7 @@ object HealthCheckRoutes:
         }
       
       // Readiness probe - returns 200 if ready, 503 if not ready
-      case GET -> Root / "health" / "ready" =>
+      case GET -> Root / "ready" =>
         healthCheck.readiness.flatMap { status =>
           if status.ready then
             Ok(status.asJson)
@@ -52,7 +52,7 @@ object HealthCheckRoutes:
         }
       
       // Detailed status - always returns 200 with comprehensive metrics
-      case GET -> Root / "health" / "status" =>
+      case GET -> Root / "status" =>
         healthCheck.status.flatMap { appStatus =>
           Ok(appStatus.asJson)
         }

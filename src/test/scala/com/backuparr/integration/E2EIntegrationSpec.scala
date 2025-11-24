@@ -125,15 +125,19 @@ class E2EIntegrationSpec extends CatsEffectSuite:
   ): IO[ArrInstanceConfig] =
     IO.delay(sys.props.get(envVar).orElse(sys.env.get(envVar))) flatMap {
       case Some(apiKey) =>
-        IO.pure(ArrInstanceConfig(
-          name = name,
-          arrType = arrType,
-          url = url,
-          apiKey = Some(apiKey),
-          schedule = "* * * * *", // Every minute (for testing)
-          s3BucketName = testBucket.name,
-          retentionPolicy = retentionPolicy
-        ))
+        // Write API key to a temp file
+        val tempFile = Files.createTempFile(s"backuparr-test-$name-", ".key")
+        tempFile.toFile.deleteOnExit()
+        IO.delay(Files.writeString(tempFile, apiKey)).as:
+          ArrInstanceConfig(
+            name = name,
+            arrType = arrType,
+            url = url,
+            apiKeyFile = tempFile.toString,
+            schedule = "* * * * *", // Every minute (for testing)
+            s3BucketName = testBucket.name,
+            retentionPolicy = retentionPolicy
+          )
       case None =>
         IO.raiseError(
           new RuntimeException(s"API key not found for $envVar")
@@ -203,7 +207,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       sonarrConfig <- getInstanceConfig(
         "sonarr-e2e",
         ArrType.Sonarr,
-        "http://localhost:8989",
+        "http://localhost:8989/sonarr",
         "SONARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -211,7 +215,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       radarrConfig <- getInstanceConfig(
         "radarr-e2e",
         ArrType.Radarr,
-        "http://localhost:7878",
+        "http://localhost:7878/radarr",
         "RADARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -293,7 +297,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       sonarrConfig <- getInstanceConfig(
         "sonarr-scheduler",
         ArrType.Sonarr,
-        "http://localhost:8989",
+        "http://localhost:8989/sonarr",
         "SONARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -301,7 +305,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       radarrConfig <- getInstanceConfig(
         "radarr-scheduler",
         ArrType.Radarr,
-        "http://localhost:7878",
+        "http://localhost:7878/radarr",
         "RADARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -375,7 +379,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       keepLastConfig <- getInstanceConfig(
         "test-keeplast",
         ArrType.Sonarr,
-        "http://localhost:8989",
+        "http://localhost:8989/sonarr",
         "SONARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(3))
       )
@@ -384,7 +388,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       combinedConfig <- getInstanceConfig(
         "test-combined",
         ArrType.Radarr,
-        "http://localhost:7878",
+        "http://localhost:7878/radarr",
         "RADARR_API_KEY",
         RetentionPolicyConfig(
           keepLast = Some(2),

@@ -137,11 +137,8 @@ case class ArrInstanceConfig(
   /** Base URL of the *arr instance (e.g., http://sonarr:8989) */
   url: String,
   
-  /** API key for authentication (optional, can use apiKeyFile instead) */
-  apiKey: Option[String] = None,
-  
-  /** Path to file containing API key (for K8s secrets) */
-  apiKeyFile: Option[String] = None,
+  /** Path to file containing API key (mounted as K8s secret) */
+  apiKeyFile: String,
   
   /** Cron-like schedule expression for backups */
   schedule: String,
@@ -173,11 +170,8 @@ case class ArrInstanceConfig(
     if !url.startsWith("http://") && !url.startsWith("https://") then
       errors += "url must start with http:// or https://"
     
-    if apiKey.isEmpty && apiKeyFile.isEmpty then
-      errors += "either apiKey or apiKeyFile must be specified"
-    
-    if apiKey.isDefined && apiKeyFile.isDefined then
-      errors += "cannot specify both apiKey and apiKeyFile"
+    if apiKeyFile.trim.isEmpty then
+      errors += "apiKeyFile must be specified"
     
     if schedule.trim.isEmpty then
       errors += "schedule cannot be empty"
@@ -238,6 +232,12 @@ case class S3BucketConfig(
     
     if credentialsFile.trim.isEmpty then
       errors += "credentialsFile cannot be empty"
+    
+    // Validate endpoint URL has a scheme if provided
+    endpoint.foreach { ep =>
+      if !ep.startsWith("http://") && !ep.startsWith("https://") then
+        errors += s"endpoint must start with http:// or https://, got: $ep"
+    }
     
     // For non-AWS providers, endpoint might be required
     provider match

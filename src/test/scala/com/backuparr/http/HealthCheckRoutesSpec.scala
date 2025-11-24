@@ -23,7 +23,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     name = "test-sonarr",
     arrType = ArrType.Sonarr,
     url = "http://localhost:8989",
-    apiKey = Some("test-key"),
+    apiKeyFile = "/tmp/test-key",
     schedule = "0 0 * * *",
     s3BucketName = "test-bucket",
     retentionPolicy = RetentionPolicyConfig(keepLast = Some(3))
@@ -52,7 +52,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     override def objectExists(bucket: S3BucketConfig, key: String) = ???
   }
   
-  test("GET /health/live returns 200 OK with alive status") {
+  test("GET /health returns 200 OK with alive status") {
     for
       healthCheck <- HealthCheckImpl.make[IO](
         mockBackupManager,
@@ -63,7 +63,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
       )
       routes = HealthCheckRoutes.routes[IO](healthCheck)
       
-      request = Request[IO](Method.GET, uri"/health/live")
+      request = Request[IO](Method.GET, uri"/health")
       response <- routes.orNotFound.run(request)
       
       _ <- IO(assertEquals(response.status, Status.Ok))
@@ -75,7 +75,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     yield ()
   }
   
-  test("GET /health/ready returns 503 when startup not complete") {
+  test("GET /ready returns 503 when startup not complete") {
     for
       healthCheck <- HealthCheckImpl.make[IO](
         mockBackupManager,
@@ -86,7 +86,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
       )
       routes = HealthCheckRoutes.routes[IO](healthCheck)
       
-      request = Request[IO](Method.GET, uri"/health/ready")
+      request = Request[IO](Method.GET, uri"/ready")
       response <- routes.orNotFound.run(request)
       
       // Should be not ready initially (startup not complete)
@@ -99,7 +99,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     yield ()
   }
   
-  test("GET /health/ready returns 200 when ready") {
+  test("GET /ready returns 200 when ready") {
     for
       healthCheck <- HealthCheckImpl.make[IO](
         mockBackupManager,
@@ -114,7 +114,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
       
       routes = HealthCheckRoutes.routes[IO](healthCheck)
       
-      request = Request[IO](Method.GET, uri"/health/ready")
+      request = Request[IO](Method.GET, uri"/ready")
       response <- routes.orNotFound.run(request)
       
       _ <- IO(assertEquals(response.status, Status.Ok))
@@ -126,7 +126,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     yield ()
   }
   
-  test("GET /health/ready returns 503 when scheduler not running") {
+  test("GET /ready returns 503 when scheduler not running") {
     for
       healthCheck <- HealthCheckImpl.make[IO](
         mockBackupManager,
@@ -140,7 +140,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
       
       routes = HealthCheckRoutes.routes[IO](healthCheck)
       
-      request = Request[IO](Method.GET, uri"/health/ready")
+      request = Request[IO](Method.GET, uri"/ready")
       response <- routes.orNotFound.run(request)
       
       _ <- IO(assertEquals(response.status, Status.ServiceUnavailable))
@@ -152,7 +152,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     yield ()
   }
   
-  test("GET /health/status returns detailed status") {
+  test("GET /status returns detailed status") {
     for
       healthCheck <- HealthCheckImpl.make[IO](
         mockBackupManager,
@@ -166,7 +166,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
       
       routes = HealthCheckRoutes.routes[IO](healthCheck)
       
-      request = Request[IO](Method.GET, uri"/health/status")
+      request = Request[IO](Method.GET, uri"/status")
       response <- routes.orNotFound.run(request)
       
       _ <- IO(assertEquals(response.status, Status.Ok))
@@ -190,7 +190,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
     yield ()
   }
   
-  test("GET /health/status always returns 200 even when not ready") {
+  test("GET /status always returns 200 even when not ready") {
     for
       healthCheck <- HealthCheckImpl.make[IO](
         mockBackupManager,
@@ -202,7 +202,7 @@ class HealthCheckRoutesSpec extends CatsEffectSuite:
       
       routes = HealthCheckRoutes.routes[IO](healthCheck)
       
-      request = Request[IO](Method.GET, uri"/health/status")
+      request = Request[IO](Method.GET, uri"/status")
       response <- routes.orNotFound.run(request)
       
       // Status endpoint always returns 200

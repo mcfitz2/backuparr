@@ -61,7 +61,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   /**
    * Helper to get config for a test instance.
-   * Reads API key from environment variable.
+   * Reads API key from environment variable and writes it to a temp file.
    */
   def getInstanceConfig(
     name: String,
@@ -72,15 +72,19 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
     // Try sys.props first (set by sbt task), then fall back to sys.env
     IO.delay(sys.props.get(envVar).orElse(sys.env.get(envVar))) flatMap:
       case Some(apiKey) =>
-        IO.pure(ArrInstanceConfig(
-          name = name,
-          arrType = arrType,
-          url = url,
-          apiKey = Some(apiKey),
-          schedule = "0 2 * * *",
-          s3BucketName = "test-bucket",
-          retentionPolicy = com.backuparr.config.RetentionPolicyConfig(keepLast = Some(7))
-        ))
+        // Write API key to a temp file
+        val tempFile = JFiles.createTempFile(s"backuparr-test-$name-", ".key")
+        tempFile.toFile.deleteOnExit()
+        IO.delay(JFiles.writeString(tempFile, apiKey)).as:
+          ArrInstanceConfig(
+            name = name,
+            arrType = arrType,
+            url = url,
+            apiKeyFile = tempFile.toString,
+            schedule = "0 2 * * *",
+            s3BucketName = "test-bucket",
+            retentionPolicy = com.backuparr.config.RetentionPolicyConfig(keepLast = Some(7))
+          )
       case None =>
         IO.raiseError(
           new RuntimeException(
@@ -108,7 +112,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Sonarr - request backup and check status".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
       client <- makeClient
       
       // Request a backup
@@ -134,7 +138,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Radarr - request backup and check status".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("radarr-test", ArrType.Radarr, "http://localhost:7878", "RADARR_API_KEY")
+      config <- getInstanceConfig("radarr-test", ArrType.Radarr, "http://localhost:7878/radarr", "RADARR_API_KEY")
       client <- makeClient
       
       backupId <- client.requestBackup(config)
@@ -153,7 +157,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Lidarr - request backup and check status".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("lidarr-test", ArrType.Lidarr, "http://localhost:8686", "LIDARR_API_KEY")
+      config <- getInstanceConfig("lidarr-test", ArrType.Lidarr, "http://localhost:8686/lidarr", "LIDARR_API_KEY")
       client <- makeClient
       
       backupId <- client.requestBackup(config)
@@ -191,7 +195,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Sonarr - download backup file".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
       client <- makeClient
       
       // Request and wait for backup
@@ -219,17 +223,24 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   }
   
   test("Invalid API key returns error".tag(integrationTag)) {
-    val invalidConfig = ArrInstanceConfig(
-      name = "invalid-sonarr",
-      arrType = ArrType.Sonarr,
-      url = "http://localhost:8989",
-      apiKey = Some("invalid-api-key-12345"),
-      schedule = "0 2 * * *",
-      s3BucketName = "test-bucket",
-      retentionPolicy = com.backuparr.config.RetentionPolicyConfig(keepLast = Some(7))
-    )
-    
     for
+      // Create temp file with invalid API key
+      tempFile <- IO.delay:
+        val f = JFiles.createTempFile("backuparr-test-invalid-", ".key")
+        f.toFile.deleteOnExit()
+        JFiles.writeString(f, "invalid-api-key-12345")
+        f
+      
+      invalidConfig = ArrInstanceConfig(
+        name = "invalid-sonarr",
+        arrType = ArrType.Sonarr,
+        url = "http://localhost:8989/sonarr",
+        apiKeyFile = tempFile.toString,
+        schedule = "0 2 * * *",
+        s3BucketName = "test-bucket",
+        retentionPolicy = com.backuparr.config.RetentionPolicyConfig(keepLast = Some(7))
+      )
+      
       client <- makeClient
       
       // This should fail during API version detection with an auth error
@@ -250,17 +261,24 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   }
   
   test("Non-existent instance returns error".tag(integrationTag)) {
-    val nonExistentConfig = ArrInstanceConfig(
-      name = "non-existent",
-      arrType = ArrType.Sonarr,
-      url = "http://localhost:9999",  // Non-existent port
-      apiKey = Some("some-key"),
-      schedule = "0 2 * * *",
-      s3BucketName = "test-bucket",
-      retentionPolicy = com.backuparr.config.RetentionPolicyConfig(keepLast = Some(7))
-    )
-    
     for
+      // Create temp file with dummy API key
+      tempFile <- IO.delay:
+        val f = JFiles.createTempFile("backuparr-test-nonexistent-", ".key")
+        f.toFile.deleteOnExit()
+        JFiles.writeString(f, "some-key")
+        f
+      
+      nonExistentConfig = ArrInstanceConfig(
+        name = "non-existent",
+        arrType = ArrType.Sonarr,
+        url = "http://localhost:9999",  // Non-existent port
+        apiKeyFile = tempFile.toString,
+        schedule = "0 2 * * *",
+        s3BucketName = "test-bucket",
+        retentionPolicy = com.backuparr.config.RetentionPolicyConfig(keepLast = Some(7))
+      )
+      
       client <- makeClient
       
       // This should fail during API version detection with a connection error

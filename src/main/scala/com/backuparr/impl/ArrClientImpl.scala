@@ -276,37 +276,27 @@ class ArrClientImpl[F[_]: Async: Files](
     yield destinationFile
   
   /**
-   * Load the API key for an instance.
+   * Load the API key for an instance from the configured file.
    * 
-   * The API key can be specified directly in the config or loaded from a file.
-   * This is to support Kubernetes secrets mounted as files.
+   * This supports Kubernetes secrets mounted as files for secure API key storage.
    * 
    * @param instance Instance configuration
    * @return API key string
    */
   private def loadApiKey(instance: ArrInstanceConfig): F[String] =
-    instance.apiKey match
-      case Some(key) => 
-        Async[F].pure(key)
-      case None =>
-        instance.apiKeyFile match
-          case Some(filePath) =>
-            // Read the API key from the file
-            Files[F]
-              .readAll(Fs2Path(filePath))
-              .through(fs2.text.utf8.decode)
-              .compile
-              .string
-              .map(_.trim)
-              .adaptError:
-                case e: Exception =>
-                  BackupErrorException(BackupError.ConfigurationError(
-                    s"Failed to read API key from file $filePath: ${e.getMessage}"
-                  ))
-          case None =>
-            Async[F].raiseError(
-              BackupErrorException(BackupError.ConfigurationError("No API key or API key file specified"))
-            )
+    // Read the API key from the file
+    Files[F]
+      .readAll(Fs2Path(instance.apiKeyFile))
+      .through(fs2.text.utf8.decode)
+      .compile
+      .string
+      .map(_.trim)
+      .adaptError:
+        case e: Exception =>
+          BackupErrorException(BackupError.ConfigurationError(
+            s"Failed to read API key from file ${instance.apiKeyFile}: ${e.getMessage}"
+          ))
+
   
   /**
    * Detect the API version for an *arr instance.
@@ -316,6 +306,7 @@ class ArrClientImpl[F[_]: Async: Files](
    * - Sonarr v4 and Radarr v6 use /api/v3/
    * 
    * We detect this by trying v3 first, then falling back to v1.
+   * If we get redirects (30x status codes), we log a helpful message about URL base paths.
    * 
    * @param instance Instance configuration
    * @param apiKey API key for authentication
@@ -328,9 +319,24 @@ class ArrClientImpl[F[_]: Async: Files](
         uri = Uri.unsafeFromString(s"${instance.url}/api/$version/system/status")
       ).withHeaders(Header.Raw(ci"X-Api-Key", apiKey))
       
-      httpClient.expect[SystemStatus](request)
-        .map(_ => Some(version))
-        .handleError(_ => None)
+      // Use run instead of expect to get access to the response status
+      httpClient.run(request).use { response =>
+        response.status.code match
+          case code if code >= 300 && code < 400 =>
+            // Redirect detected - log helpful message
+            val location = response.headers.get(ci"Location").map(_.head.value).getOrElse("unknown")
+            logger.warn(
+              s"Received redirect (${response.status.code}) when accessing ${instance.url}/api/$version/system/status. " +
+              s"This usually means the *arr instance is using a URL base path (e.g., /sonarr). " +
+              s"Update your configuration URL to include the base path. Redirect location: $location"
+            ).as(None)
+          case code if code >= 200 && code < 300 =>
+            // Success - decode the response
+            response.as[SystemStatus].map(_ => Some(version)).handleError(_ => None)
+          case _ =>
+            // Other error - not a valid version
+            Async[F].pure(None)
+      }.handleError(_ => None)
     
     // Try v3 first (most common), then v1
     tryVersion("v3").flatMap:
@@ -339,7 +345,8 @@ class ArrClientImpl[F[_]: Async: Files](
         case Some(version) => Async[F].pure(version)
         case None => Async[F].raiseError(
           BackupErrorException(BackupError.ArrApiError(
-            "Could not detect API version (tried v3 and v1)",
+            "Could not detect API version (tried v3 and v1). " +
+            "If you're seeing redirect errors above, make sure your URL includes the base path (e.g., http://host:port/sonarr)",
             None
           ))
         )
