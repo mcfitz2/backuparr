@@ -7,12 +7,11 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=America/New_York
-      - URL_BASE=/sonarr
     ports:
       - "8989:8989"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8989/sonarr/ping"]
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,12 +25,11 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=America/New_York
-      - URL_BASE=/radarr
     ports:
       - "7878:7878"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7878/radarr/ping"]
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -45,12 +43,11 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=America/New_York
-      - URL_BASE=/lidarr
     ports:
       - "8686:8686"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8686/lidarr/ping"]
+      test: ["CMD", "curl", "-f", "http://localhost:8686/ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -64,12 +61,11 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=America/New_York
-      - URL_BASE=/prowlarr
     ports:
       - "9696:9696"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9696/prowlarr/ping"]
+      test: ["CMD", "curl", "-f", "http://localhost:9696/ping"]
       interval: 10s
       timeout: 5s
       retries: 5

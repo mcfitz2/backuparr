@@ -207,7 +207,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       sonarrConfig <- getInstanceConfig(
         "sonarr-e2e",
         ArrType.Sonarr,
-        "http://localhost:8989/sonarr",
+        "http://localhost:8989",
         "SONARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -215,7 +215,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       radarrConfig <- getInstanceConfig(
         "radarr-e2e",
         ArrType.Radarr,
-        "http://localhost:7878/radarr",
+        "http://localhost:7878",
         "RADARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -297,7 +297,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       sonarrConfig <- getInstanceConfig(
         "sonarr-scheduler",
         ArrType.Sonarr,
-        "http://localhost:8989/sonarr",
+        "http://localhost:8989",
         "SONARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -305,7 +305,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       radarrConfig <- getInstanceConfig(
         "radarr-scheduler",
         ArrType.Radarr,
-        "http://localhost:7878/radarr",
+        "http://localhost:7878",
         "RADARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(2))
       )
@@ -379,7 +379,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       keepLastConfig <- getInstanceConfig(
         "test-keeplast",
         ArrType.Sonarr,
-        "http://localhost:8989/sonarr",
+        "http://localhost:8989",
         "SONARR_API_KEY",
         RetentionPolicyConfig(keepLast = Some(3))
       )
@@ -388,7 +388,7 @@ class E2EIntegrationSpec extends CatsEffectSuite:
       combinedConfig <- getInstanceConfig(
         "test-combined",
         ArrType.Radarr,
-        "http://localhost:7878/radarr",
+        "http://localhost:7878",
         "RADARR_API_KEY",
         RetentionPolicyConfig(
           keepLast = Some(2),

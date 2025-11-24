@@ -112,7 +112,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Sonarr - request backup and check status".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
       client <- makeClient
       
       // Request a backup
@@ -138,7 +138,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Radarr - request backup and check status".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("radarr-test", ArrType.Radarr, "http://localhost:7878/radarr", "RADARR_API_KEY")
+      config <- getInstanceConfig("radarr-test", ArrType.Radarr, "http://localhost:7878", "RADARR_API_KEY")
       client <- makeClient
       
       backupId <- client.requestBackup(config)
@@ -157,7 +157,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Lidarr - request backup and check status".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("lidarr-test", ArrType.Lidarr, "http://localhost:8686/lidarr", "LIDARR_API_KEY")
+      config <- getInstanceConfig("lidarr-test", ArrType.Lidarr, "http://localhost:8686", "LIDARR_API_KEY")
       client <- makeClient
       
       backupId <- client.requestBackup(config)
@@ -195,7 +195,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
   
   test("Sonarr - download backup file".tag(integrationTag)) {
     for
-      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989/sonarr", "SONARR_API_KEY")
+      config <- getInstanceConfig("sonarr-test", ArrType.Sonarr, "http://localhost:8989", "SONARR_API_KEY")
       client <- makeClient
       
       // Request and wait for backup
@@ -234,7 +234,7 @@ class ArrClientIntegrationSpec extends CatsEffectSuite:
       invalidConfig = ArrInstanceConfig(
         name = "invalid-sonarr",
         arrType = ArrType.Sonarr,
-        url = "http://localhost:8989/sonarr",
+        url = "http://localhost:8989",
         apiKeyFile = tempFile.toString,
         schedule = "0 2 * * *",
         s3BucketName = "test-bucket",
