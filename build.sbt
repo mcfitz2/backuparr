@@ -236,7 +236,7 @@ integrationTest := {
     log.info("=" * 80)
     log.info("Starting docker-compose test environment...")
     log.info("=" * 80)
-    val startExitCode = s"docker-compose -f $dockerComposeFile up -d".!
+    val startExitCode = s"docker compose -f $dockerComposeFile up -d".!
     if (startExitCode != 0) {
       sys.error("Failed to start docker-compose")
     }
@@ -255,7 +255,7 @@ integrationTest := {
       attempt += 1
       Thread.sleep(5000)
       
-      val healthStatus = s"docker-compose -f $dockerComposeFile ps --format json".!!
+      val healthStatus = s"docker compose -f $dockerComposeFile ps --format json".!!
       val allRunning = healthStatus.contains("\"State\":\"running\"")
       
       if (allRunning) {
@@ -393,7 +393,7 @@ integrationTest := {
     log.info("Cleaning up docker-compose environment...")
     log.info("=" * 80)
     
-    val downExitCode = s"docker-compose -f $dockerComposeFile down".!
+    val downExitCode = s"docker compose -f $dockerComposeFile down".!
     if (downExitCode == 0) {
       log.info("✓ Docker-compose stopped successfully")
     } else {
