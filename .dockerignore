@@ -1,0 +1,7 @@
+.git
+backuparr
+backups/
+config.yml
+.metals/
+integration-tests/
+docs/
