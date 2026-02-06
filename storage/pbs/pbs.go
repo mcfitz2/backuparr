@@ -107,7 +107,7 @@ func (b *PBSBackend) baseArgs() []string {
 //
 // The zip data is written to a temp file, then uploaded via:
 //
-//	proxmox-backup-client backup backup.blob:<tempfile> --backup-id <appName> --repository <repo>
+//	proxmox-backup-client backup backup.img:<tempfile> --backup-id <appName> --repository <repo>
 //
 // This creates a snapshot at host/<appName>/<timestamp> on the PBS server.
 func (b *PBSBackend) Upload(ctx context.Context, appName string, fileName string, data io.Reader, size int64) (*storage.BackupMetadata, error) {
@@ -126,8 +126,8 @@ func (b *PBSBackend) Upload(ctx context.Context, appName string, fileName string
 	}
 	tmpFile.Close()
 
-	// proxmox-backup-client backup backup.blob:<path> --backup-id <appName>
-	args := []string{"backup", fmt.Sprintf("backup.blob:%s", tmpPath), "--backup-id", appName}
+	// proxmox-backup-client backup backup.img:<path> --backup-id <appName>
+	args := []string{"backup", fmt.Sprintf("backup.img:%s", tmpPath), "--backup-id", appName}
 	args = append(args, b.baseArgs()...)
 
 	cmd := exec.CommandContext(ctx, "proxmox-backup-client", args...)
@@ -166,7 +166,7 @@ func (b *PBSBackend) Upload(ctx context.Context, appName string, fileName string
 //
 // The snapshot is restored to a temp file via:
 //
-//	proxmox-backup-client restore <snapshot> backup.blob <tempfile> --repository <repo>
+//	proxmox-backup-client restore <snapshot> backup.img <tempfile> --repository <repo>
 func (b *PBSBackend) Download(ctx context.Context, key string) (io.ReadCloser, *storage.BackupMetadata, error) {
 	tmpFile, err := os.CreateTemp("", "backuparr-pbs-restore-*.zip")
 	if err != nil {
@@ -175,8 +175,8 @@ func (b *PBSBackend) Download(ctx context.Context, key string) (io.ReadCloser, *
 	tmpPath := tmpFile.Name()
 	tmpFile.Close()
 
-	// proxmox-backup-client restore <snapshot> backup.blob <target>
-	args := []string{"restore", key, "backup.blob", tmpPath}
+	// proxmox-backup-client restore <snapshot> backup.img <target>
+	args := []string{"restore", key, "backup.img", tmpPath}
 	args = append(args, b.baseArgs()...)
 
 	cmd := exec.CommandContext(ctx, "proxmox-backup-client", args...)
