@@ -1,0 +1,284 @@
+# Test environment for backuparr development
+# Spins up Sonarr and Radarr instances with both SQLite and PostgreSQL backends
+
+services:
+  # ============================================
+  # PostgreSQL Databases
+  # ============================================
+  sonarr-postgres-db:
+    image: postgres:16-alpine
+    container_name: sonarr-postgres-db
+    environment:
+      POSTGRES_USER: sonarr
+      POSTGRES_PASSWORD: sonarr_test_password
+      POSTGRES_DB: sonarr-main
+      # Create the log database on startup
+      POSTGRES_INITDB_ARGS: ""
+    volumes:
+      - sonarr-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonarr -d sonarr-main"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      bash -c "
+        docker-entrypoint.sh postgres &
+        sleep 5
+        until pg_isready -U sonarr -d sonarr-main; do sleep 1; done
+        psql -U sonarr -d postgres -c 'CREATE DATABASE \"sonarr-log\"' 2>/dev/null || true
+        wait
+      "
+
+  radarr-postgres-db:
+    image: postgres:16-alpine
+    container_name: radarr-postgres-db
+    environment:
+      POSTGRES_USER: radarr
+      POSTGRES_PASSWORD: radarr_test_password
+      POSTGRES_DB: radarr-main
+    volumes:
+      - radarr-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radarr -d radarr-main"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      bash -c "
+        docker-entrypoint.sh postgres &
+        sleep 5
+        until pg_isready -U radarr -d radarr-main; do sleep 1; done
+        psql -U radarr -d postgres -c 'CREATE DATABASE \"radarr-log\"' 2>/dev/null || true
+        wait
+      "
+
+  # ============================================
+  # Sonarr Instances
+  # ============================================
+  
+  # Sonarr with SQLite (default)
+  sonarr-sqlite:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr-sqlite
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - sonarr-sqlite-config:/config
+      - ./test-media:/tv
+      - ./test-downloads:/downloads
+    entrypoint: |
+      /bin/bash -c '
+        if [ ! -f /config/config.xml ]; then
+          cat > /config/config.xml << "EOF"
+      <Config>
+        <BindAddress>*</BindAddress>
+        <Port>8989</Port>
+        <SslPort>9898</SslPort>
+        <EnableSsl>False</EnableSsl>
+        <LaunchBrowser>False</LaunchBrowser>
+        <ApiKey>sonarrsqlitetestkey12345</ApiKey>
+        <AuthenticationMethod>None</AuthenticationMethod>
+        <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+        <Branch>main</Branch>
+        <LogLevel>info</LogLevel>
+        <SslCertPath></SslCertPath>
+        <SslCertPassword></SslCertPassword>
+        <UrlBase></UrlBase>
+        <InstanceName>Sonarr-SQLite-Test</InstanceName>
+        <UpdateMechanism>Docker</UpdateMechanism>
+      </Config>
+      EOF
+          chown 1000:1000 /config/config.xml
+        fi
+        exec /init
+      '
+    ports:
+      - "8989:8989"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # Sonarr with PostgreSQL
+  sonarr-postgres:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr-postgres
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - sonarr-postgres-config:/config
+      - ./test-media:/tv
+      - ./test-downloads:/downloads
+    entrypoint: |
+      /bin/bash -c '
+        if [ ! -f /config/config.xml ]; then
+          cat > /config/config.xml << "EOF"
+      <Config>
+        <PostgresUser>sonarr</PostgresUser>
+        <PostgresPassword>sonarr_test_password</PostgresPassword>
+        <PostgresPort>5432</PostgresPort>
+        <PostgresHost>sonarr-postgres-db</PostgresHost>
+        <PostgresMainDb>sonarr-main</PostgresMainDb>
+        <PostgresLogDb>sonarr-log</PostgresLogDb>
+        <BindAddress>*</BindAddress>
+        <Port>8989</Port>
+        <SslPort>9898</SslPort>
+        <EnableSsl>False</EnableSsl>
+        <LaunchBrowser>False</LaunchBrowser>
+        <ApiKey>sonarrpostgrestestkey123</ApiKey>
+        <AuthenticationMethod>None</AuthenticationMethod>
+        <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+        <Branch>main</Branch>
+        <LogLevel>info</LogLevel>
+        <SslCertPath></SslCertPath>
+        <SslCertPassword></SslCertPassword>
+        <UrlBase></UrlBase>
+        <InstanceName>Sonarr-Postgres-Test</InstanceName>
+        <UpdateMechanism>Docker</UpdateMechanism>
+      </Config>
+      EOF
+          chown 1000:1000 /config/config.xml
+        fi
+        exec /init
+      '
+    ports:
+      - "8990:8989"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      sonarr-postgres-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ============================================
+  # Radarr Instances
+  # ============================================
+  
+  # Radarr with SQLite (default)
+  radarr-sqlite:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr-sqlite
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - radarr-sqlite-config:/config
+      - ./test-media:/movies
+      - ./test-downloads:/downloads
+    entrypoint: |
+      /bin/bash -c '
+        if [ ! -f /config/config.xml ]; then
+          cat > /config/config.xml << "EOF"
+      <Config>
+        <BindAddress>*</BindAddress>
+        <Port>7878</Port>
+        <SslPort>9899</SslPort>
+        <EnableSsl>False</EnableSsl>
+        <LaunchBrowser>False</LaunchBrowser>
+        <ApiKey>radarrsqlitetestkey12345</ApiKey>
+        <AuthenticationMethod>None</AuthenticationMethod>
+        <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+        <Branch>main</Branch>
+        <LogLevel>info</LogLevel>
+        <SslCertPath></SslCertPath>
+        <SslCertPassword></SslCertPassword>
+        <UrlBase></UrlBase>
+        <InstanceName>Radarr-SQLite-Test</InstanceName>
+        <UpdateMechanism>Docker</UpdateMechanism>
+      </Config>
+      EOF
+          chown 1000:1000 /config/config.xml
+        fi
+        exec /init
+      '
+    ports:
+      - "7878:7878"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # Radarr with PostgreSQL
+  radarr-postgres:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr-postgres
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - radarr-postgres-config:/config
+      - ./test-media:/movies
+      - ./test-downloads:/downloads
+    entrypoint: |
+      /bin/bash -c '
+        if [ ! -f /config/config.xml ]; then
+          cat > /config/config.xml << "EOF"
+      <Config>
+        <PostgresUser>radarr</PostgresUser>
+        <PostgresPassword>radarr_test_password</PostgresPassword>
+        <PostgresPort>5432</PostgresPort>
+        <PostgresHost>radarr-postgres-db</PostgresHost>
+        <PostgresMainDb>radarr-main</PostgresMainDb>
+        <PostgresLogDb>radarr-log</PostgresLogDb>
+        <BindAddress>*</BindAddress>
+        <Port>7878</Port>
+        <SslPort>9899</SslPort>
+        <EnableSsl>False</EnableSsl>
+        <LaunchBrowser>False</LaunchBrowser>
+        <ApiKey>radarrpostgrestestkey123</ApiKey>
+        <AuthenticationMethod>None</AuthenticationMethod>
+        <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+        <Branch>main</Branch>
+        <LogLevel>info</LogLevel>
+        <SslCertPath></SslCertPath>
+        <SslCertPassword></SslCertPassword>
+        <UrlBase></UrlBase>
+        <InstanceName>Radarr-Postgres-Test</InstanceName>
+        <UpdateMechanism>Docker</UpdateMechanism>
+      </Config>
+      EOF
+          chown 1000:1000 /config/config.xml
+        fi
+        exec /init
+      '
+    ports:
+      - "7879:7878"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      radarr-postgres-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  sonarr-sqlite-config:
+  sonarr-postgres-config:
+  sonarr-postgres-data:
+  radarr-sqlite-config:
+  radarr-postgres-config:
+  radarr-postgres-data:

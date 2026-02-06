@@ -1,0 +1,23 @@
+<Config>
+  <PostgresUser>radarr</PostgresUser>
+  <PostgresPassword>radarr_test_password</PostgresPassword>
+  <PostgresPort>5432</PostgresPort>
+  <PostgresHost>radarr-postgres-db</PostgresHost>
+  <PostgresMainDb>radarr-main</PostgresMainDb>
+  <PostgresLogDb>radarr-log</PostgresLogDb>
+  <LogLevel>info</LogLevel>
+  <UrlBase></UrlBase>
+  <BindAddress>*</BindAddress>
+  <Port>7878</Port>
+  <SslPort>9898</SslPort>
+  <EnableSsl>False</EnableSsl>
+  <LaunchBrowser>False</LaunchBrowser>
+  <ApiKey>radarrpostgrestestkey123</ApiKey>
+  <AuthenticationMethod>None</AuthenticationMethod>
+  <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+  <Branch>master</Branch>
+  <SslCertPath></SslCertPath>
+  <SslCertPassword></SslCertPassword>
+  <InstanceName>Radarr-Postgres-Test</InstanceName>
+  <UpdateMechanism>Docker</UpdateMechanism>
+</Config>

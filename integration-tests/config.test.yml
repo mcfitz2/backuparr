@@ -1,0 +1,48 @@
+# Test configuration for local Docker instances
+# Use this for testing backup/restore without affecting production
+# All API keys are pre-configured - no manual setup needed!
+
+appConfigs:
+  # SQLite instances (no postgres config needed)
+  - appType: sonarr
+    connection:
+      apiKey: "sonarrsqlitetestkey1234"
+      url: "http://localhost:8989"
+      username: ""
+      password: ""
+    retention:
+      keepLast: 3
+
+  - appType: radarr
+    connection:
+      apiKey: "radarrsqlitetestkey1234"
+      url: "http://localhost:7878"
+      username: ""
+      password: ""
+    retention:
+      keepLast: 3
+
+  # PostgreSQL instances
+  - appType: sonarr
+    connection:
+      apiKey: "sonarrpostgrestestkey123"
+      url: "http://localhost:8990"
+      username: ""
+      password: ""
+    retention:
+      keepLast: 3
+    postgres:
+      host: "localhost"
+      port: "5433"
+
+  - appType: radarr
+    connection:
+      apiKey: "radarrpostgrestestkey123"
+      url: "http://localhost:7879"
+      username: ""
+      password: ""
+    retention:
+      keepLast: 3
+    postgres:
+      host: "localhost"
+      port: "5434"

@@ -1,0 +1,23 @@
+<Config>
+  <PostgresUser>sonarr</PostgresUser>
+  <PostgresPassword>sonarr_test_password</PostgresPassword>
+  <PostgresPort>5432</PostgresPort>
+  <PostgresHost>sonarr-postgres-db</PostgresHost>
+  <PostgresMainDb>sonarr-main</PostgresMainDb>
+  <PostgresLogDb>sonarr-log</PostgresLogDb>
+  <LogLevel>info</LogLevel>
+  <UrlBase></UrlBase>
+  <BindAddress>*</BindAddress>
+  <Port>8989</Port>
+  <SslPort>9898</SslPort>
+  <EnableSsl>False</EnableSsl>
+  <LaunchBrowser>False</LaunchBrowser>
+  <ApiKey>sonarrpostgrestestkey123</ApiKey>
+  <AuthenticationMethod>None</AuthenticationMethod>
+  <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+  <Branch>main</Branch>
+  <SslCertPath></SslCertPath>
+  <SslCertPassword></SslCertPassword>
+  <InstanceName>Sonarr-Postgres-Test</InstanceName>
+  <UpdateMechanism>Docker</UpdateMechanism>
+</Config>
