@@ -1,0 +1,12 @@
+# oapi-codegen configuration for Radarr API client generation
+package: radarr
+generate:
+  client: true
+  models: true
+output: client.gen.go
+output-options:
+  skip-prune: true
+  exclude-tags:
+    - StaticResource
+    - Authentication
+    - ApiInfo
