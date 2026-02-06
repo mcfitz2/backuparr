@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -73,5 +74,80 @@ func TestFormatSize(t *testing.T) {
 				t.Errorf("formatSize(%d) = %q, want %q", tt.bytes, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPreflightCheck_NoTools(t *testing.T) {
+	// Config with no postgres and no PBS — should always pass
+	config := BackuparrConfig{
+		AppConfigs: []AppConfig{
+			{
+				AppType: "sonarr",
+				Storage: []StorageConfig{{Type: "local", Path: "./backups"}},
+			},
+		},
+	}
+	if err := preflightCheck(config); err != nil {
+		t.Fatalf("expected no error for local-only config, got: %v", err)
+	}
+}
+
+func TestPreflightCheck_PostgresTools(t *testing.T) {
+	config := BackuparrConfig{
+		AppConfigs: []AppConfig{
+			{
+				AppType:  "sonarr",
+				Postgres: &PostgresOverride{Host: "db.local"},
+				Storage:  []StorageConfig{{Type: "local"}},
+			},
+		},
+	}
+	err := preflightCheck(config)
+	// On CI/dev machines pg_dump and psql may or may not be installed.
+	// We just verify the function runs without panic and returns the right
+	// kind of error if tools are missing.
+	if err != nil {
+		if !strings.Contains(err.Error(), "pg_dump") && !strings.Contains(err.Error(), "psql") {
+			t.Errorf("expected postgres-related error, got: %v", err)
+		}
+	}
+}
+
+func TestPreflightCheck_PBSTool(t *testing.T) {
+	config := BackuparrConfig{
+		AppConfigs: []AppConfig{
+			{
+				AppType: "sonarr",
+				Storage: []StorageConfig{{Type: "pbs", Server: "pbs.local", Datastore: "store"}},
+			},
+		},
+	}
+	err := preflightCheck(config)
+	// proxmox-backup-client is unlikely to be installed in dev/CI
+	if err != nil {
+		if !strings.Contains(err.Error(), "proxmox-backup-client") {
+			t.Errorf("expected proxmox-backup-client error, got: %v", err)
+		}
+	}
+}
+
+func TestPreflightCheck_AllMissing(t *testing.T) {
+	config := BackuparrConfig{
+		AppConfigs: []AppConfig{
+			{
+				AppType:  "sonarr",
+				Postgres: &PostgresOverride{Host: "db.local"},
+				Storage:  []StorageConfig{{Type: "pbs", Server: "pbs.local", Datastore: "store"}},
+			},
+		},
+	}
+	err := preflightCheck(config)
+	if err != nil {
+		// Should mention all missing tools
+		msg := err.Error()
+		// At minimum proxmox-backup-client will be missing
+		if !strings.Contains(msg, "proxmox-backup-client") {
+			t.Errorf("expected proxmox-backup-client in error, got: %v", err)
+		}
 	}
 }

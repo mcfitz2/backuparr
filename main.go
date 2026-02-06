@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -71,13 +73,13 @@ type StorageConfig struct {
 	Path string `yaml:"path,omitempty"`
 
 	// S3 backend (future)
-	Bucket         string `yaml:"bucket,omitempty"`
-	Prefix         string `yaml:"prefix,omitempty"`
-	Region         string `yaml:"region,omitempty"`
-	Endpoint       string `yaml:"endpoint,omitempty"`
-	AccessKeyID    string `yaml:"accessKeyId,omitempty"`
+	Bucket          string `yaml:"bucket,omitempty"`
+	Prefix          string `yaml:"prefix,omitempty"`
+	Region          string `yaml:"region,omitempty"`
+	Endpoint        string `yaml:"endpoint,omitempty"`
+	AccessKeyID     string `yaml:"accessKeyId,omitempty"`
 	SecretAccessKey string `yaml:"secretAccessKey,omitempty"`
-	StorageClass   string `yaml:"storageClass,omitempty"`
+	StorageClass    string `yaml:"storageClass,omitempty"`
 
 	// PBS backend (future)
 	Server      string `yaml:"server,omitempty"`
@@ -100,6 +102,67 @@ func parseConfig(path string) (BackuparrConfig, error) {
 		return BackuparrConfig{}, fmt.Errorf("error parsing config: %w", err)
 	}
 	return config, nil
+}
+
+// configPath resolves the config file path from (in order of priority):
+// 1. BACKUPARR_CONFIG environment variable
+// 2. /config/config.yml (Docker default)
+// 3. ./config.yml (local development fallback)
+func configPath() string {
+	if v := os.Getenv("BACKUPARR_CONFIG"); v != "" {
+		return v
+	}
+	// Docker default location
+	if _, err := os.Stat("/config/config.yml"); err == nil {
+		return "/config/config.yml"
+	}
+	// Local development fallback
+	return "config.yml"
+}
+
+// preflightCheck inspects the loaded config and verifies that all required
+// external tools are available before any work begins. This avoids partial
+// failures mid-backup or mid-restore due to a missing CLI tool.
+func preflightCheck(config BackuparrConfig) error {
+	var needPgDump, needPsql, needPBS bool
+
+	for _, app := range config.AppConfigs {
+		// If any app has an explicit postgres override, we'll need pg tools
+		if app.Postgres != nil {
+			needPgDump = true
+			needPsql = true
+		}
+
+		for _, sc := range app.Storage {
+			if sc.Type == "pbs" {
+				needPBS = true
+			}
+		}
+	}
+
+	var missing []string
+
+	if needPgDump {
+		if _, err := exec.LookPath("pg_dump"); err != nil {
+			missing = append(missing, "pg_dump (required for PostgreSQL backup)")
+		}
+	}
+	if needPsql {
+		if _, err := exec.LookPath("psql"); err != nil {
+			missing = append(missing, "psql (required for PostgreSQL restore)")
+		}
+	}
+	if needPBS {
+		if _, err := exec.LookPath("proxmox-backup-client"); err != nil {
+			missing = append(missing, "proxmox-backup-client (required for PBS storage backend)")
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required tools:\n  - %s", strings.Join(missing, "\n  - "))
+	}
+
+	return nil
 }
 
 func createClient(cfg AppConfig) (backup.Client, error) {
@@ -146,13 +209,13 @@ func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
 				prefix = "backuparr"
 			}
 			s3cfg := s3backend.Config{
-				Bucket:         cfg.Bucket,
-				Prefix:         prefix,
-				Region:         cfg.Region,
-				Endpoint:       cfg.Endpoint,
-				AccessKeyID:    cfg.AccessKeyID,
+				Bucket:          cfg.Bucket,
+				Prefix:          prefix,
+				Region:          cfg.Region,
+				Endpoint:        cfg.Endpoint,
+				AccessKeyID:     cfg.AccessKeyID,
 				SecretAccessKey: cfg.SecretAccessKey,
-				StorageClass:   cfg.StorageClass,
+				StorageClass:    cfg.StorageClass,
 			}
 			backend, err := s3backend.New(context.Background(), s3cfg)
 			if err != nil {
@@ -237,7 +300,7 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 func main() {
 	if len(os.Args) < 2 {
 		// Default to backup when no subcommand
-		runBackupAll()
+		printUsage()
 		return
 	}
 
@@ -251,8 +314,7 @@ func main() {
 	case "help", "--help", "-h":
 		printUsage()
 	default:
-		// If the first arg isn't a known subcommand, treat as backup (backward compat)
-		runBackupAll()
+		printUsage()
 	}
 }
 
@@ -275,21 +337,31 @@ List flags:
   --app <name>            App to list backups for [required]
   --backend <type>        Storage backend to list from [required]
 
+Environment:
+  BACKUPARR_CONFIG        Path to config file (default: /config/config.yml)
+
 Examples:
   backuparr                                           # Run backups
   backuparr backup                                    # Run backups (explicit)
   backuparr list --app sonarr --backend local         # List sonarr backups
   backuparr restore --app sonarr --backend s3 --latest
   backuparr restore --app sonarr --backend local --backup "sonarr/sonarr_2026-02-06T120000Z.zip"
+
+Docker:
+  docker run -v /path/to/config.yml:/config/config.yml backuparr backup
 `)
 }
 
 func runBackupAll() {
 	ctx := context.Background()
 
-	config, err := parseConfig("config.yml")
+	config, err := parseConfig(configPath())
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	if err := preflightCheck(config); err != nil {
+		log.Fatalf("Preflight check failed: %v", err)
 	}
 
 	for _, appCfg := range config.AppConfigs {
@@ -332,9 +404,13 @@ func runRestoreCLI() {
 
 	ctx := context.Background()
 
-	config, err := parseConfig("config.yml")
+	config, err := parseConfig(configPath())
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	if err := preflightCheck(config); err != nil {
+		log.Fatalf("Preflight check failed: %v", err)
 	}
 
 	// Find the app config
@@ -402,7 +478,7 @@ func runListCLI() {
 
 	ctx := context.Background()
 
-	config, err := parseConfig("config.yml")
+	config, err := parseConfig(configPath())
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
