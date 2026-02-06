@@ -1,0 +1,45 @@
+appConfigs:
+  - appType: sonarr
+    connection:
+      apiKey: "your-sonarr-api-key"
+      url: "http://localhost:8989"
+      username: "admin"
+      password: "password"
+    retention:
+      keepLast: 5
+      keepDaily: 7
+      keepWeekly: 4
+      keepMonthly: 6
+    # Optional: Override postgres connection (auto-detected from backup if not specified)
+    # Only specify fields you need to override - others will use values from config.xml
+    # postgres:
+    #   host: "postgres-host"
+    #   port: "5432"
+    #   user: "sonarr"
+    #   password: "password"
+    #   mainDb: "sonarr-main"
+    #   logDb: "sonarr-log"
+    storage:
+      - type: local
+        path: ./backups
+      # - type: s3
+      #   bucket: my-backup-bucket
+      #   prefix: backuparr          # optional, defaults to "backuparr"
+      #   region: us-east-1
+      #   endpoint: ""               # custom endpoint for MinIO/R2/B2/Wasabi
+      #   accessKeyId: ""            # optional, falls back to AWS credential chain
+      #   secretAccessKey: ""
+      #   storageClass: STANDARD     # STANDARD, STANDARD_IA, DEEP_ARCHIVE, etc.
+
+  - appType: radarr
+    connection:
+      apiKey: "your-radarr-api-key"
+      url: "http://localhost:7878"
+      username: "admin"
+      password: "password"
+    retention:
+      keepLast: 5
+      keepDaily: 7
+    storage:
+      - type: local
+        path: ./backups
