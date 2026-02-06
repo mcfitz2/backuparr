@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"text/tabwriter"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -233,6 +235,56 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 }
 
 func main() {
+	if len(os.Args) < 2 {
+		// Default to backup when no subcommand
+		runBackupAll()
+		return
+	}
+
+	switch os.Args[1] {
+	case "backup":
+		runBackupAll()
+	case "restore":
+		runRestoreCLI()
+	case "list":
+		runListCLI()
+	case "help", "--help", "-h":
+		printUsage()
+	default:
+		// If the first arg isn't a known subcommand, treat as backup (backward compat)
+		runBackupAll()
+	}
+}
+
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `Usage: backuparr [command]
+
+Commands:
+  backup                  Run backups for all configured apps (default)
+  restore                 Restore an app from a storage backend
+  list                    List available backups from a storage backend
+  help                    Show this help message
+
+Restore flags:
+  --app <name>            App to restore (e.g. sonarr, radarr) [required]
+  --backend <type>        Storage backend to restore from (e.g. local, s3, pbs) [required]
+  --backup <key>          Specific backup key to restore
+  --latest                Restore the most recent backup
+
+List flags:
+  --app <name>            App to list backups for [required]
+  --backend <type>        Storage backend to list from [required]
+
+Examples:
+  backuparr                                           # Run backups
+  backuparr backup                                    # Run backups (explicit)
+  backuparr list --app sonarr --backend local         # List sonarr backups
+  backuparr restore --app sonarr --backend s3 --latest
+  backuparr restore --app sonarr --backend local --backup "sonarr/sonarr_2026-02-06T120000Z.zip"
+`)
+}
+
+func runBackupAll() {
 	ctx := context.Background()
 
 	config, err := parseConfig("config.yml")
@@ -256,5 +308,180 @@ func main() {
 		if err := runBackup(ctx, client, backends, appCfg.Retention); err != nil {
 			log.Printf("[%s] Backup failed: %v", appCfg.AppType, err)
 		}
+	}
+}
+
+func runRestoreCLI() {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	appName := fs.String("app", "", "App to restore (e.g. sonarr, radarr)")
+	backendType := fs.String("backend", "", "Storage backend to restore from (e.g. local, s3, pbs)")
+	backupKey := fs.String("backup", "", "Specific backup key to restore")
+	latest := fs.Bool("latest", false, "Restore the most recent backup")
+	fs.Parse(os.Args[2:])
+
+	if *appName == "" || *backendType == "" {
+		fmt.Fprintln(os.Stderr, "Error: --app and --backend are required")
+		fs.Usage()
+		os.Exit(1)
+	}
+	if *backupKey == "" && !*latest {
+		fmt.Fprintln(os.Stderr, "Error: either --backup <key> or --latest is required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+
+	config, err := parseConfig("config.yml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Find the app config
+	appCfg, err := findAppConfig(config, *appName)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// Create the app client (needed for Restore)
+	client, err := createClient(appCfg)
+	if err != nil {
+		log.Fatalf("Failed to create client for %s: %v", *appName, err)
+	}
+
+	// Find and create the specific backend
+	backend, err := findBackend(appCfg, *backendType)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// Resolve which backup to restore
+	key := *backupKey
+	if *latest {
+		backups, err := backend.List(ctx, *appName)
+		if err != nil {
+			log.Fatalf("Failed to list backups: %v", err)
+		}
+		if len(backups) == 0 {
+			log.Fatalf("No backups found for %s on %s", *appName, *backendType)
+		}
+		key = backups[0].Key
+		log.Printf("Selected latest backup: %s (created %s)", key, backups[0].CreatedAt.Format(time.RFC3339))
+	}
+
+	// Download the backup
+	log.Printf("Downloading backup %s from %s...", key, backend.Name())
+	reader, meta, err := backend.Download(ctx, key)
+	if err != nil {
+		log.Fatalf("Failed to download backup: %v", err)
+	}
+	defer reader.Close()
+
+	log.Printf("Downloaded: %s (%d bytes, created %s)", meta.FileName, meta.Size, meta.CreatedAt.Format(time.RFC3339))
+
+	// Restore
+	log.Printf("Restoring %s...", *appName)
+	if err := client.Restore(ctx, reader); err != nil {
+		log.Fatalf("Restore failed: %v", err)
+	}
+
+	log.Printf("Restore complete for %s", *appName)
+}
+
+func runListCLI() {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	appName := fs.String("app", "", "App to list backups for (e.g. sonarr, radarr)")
+	backendType := fs.String("backend", "", "Storage backend to list from (e.g. local, s3, pbs)")
+	fs.Parse(os.Args[2:])
+
+	if *appName == "" || *backendType == "" {
+		fmt.Fprintln(os.Stderr, "Error: --app and --backend are required")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+
+	config, err := parseConfig("config.yml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Find the app config
+	appCfg, err := findAppConfig(config, *appName)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// Find and create the specific backend
+	backend, err := findBackend(appCfg, *backendType)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	// List backups
+	backups, err := backend.List(ctx, *appName)
+	if err != nil {
+		log.Fatalf("Failed to list backups: %v", err)
+	}
+
+	if len(backups) == 0 {
+		fmt.Printf("No backups found for %s on %s\n", *appName, *backendType)
+		return
+	}
+
+	// Print as a formatted table
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "KEY\tFILENAME\tSIZE\tCREATED\n")
+	for _, b := range backups {
+		sizeStr := formatSize(b.Size)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", b.Key, b.FileName, sizeStr, b.CreatedAt.Format(time.RFC3339))
+	}
+	w.Flush()
+}
+
+// findAppConfig looks up the AppConfig for the given app name.
+func findAppConfig(config BackuparrConfig, appName string) (AppConfig, error) {
+	for _, cfg := range config.AppConfigs {
+		if cfg.AppType == appName {
+			return cfg, nil
+		}
+	}
+	var names []string
+	for _, cfg := range config.AppConfigs {
+		names = append(names, cfg.AppType)
+	}
+	return AppConfig{}, fmt.Errorf("app %q not found in config (available: %v)", appName, names)
+}
+
+// findBackend creates a single storage backend of the given type from the app's config.
+func findBackend(appCfg AppConfig, backendType string) (storage.Backend, error) {
+	for _, sc := range appCfg.Storage {
+		if sc.Type == backendType {
+			backends, err := createBackends([]StorageConfig{sc})
+			if err != nil {
+				return nil, err
+			}
+			return backends[0], nil
+		}
+	}
+	var types []string
+	for _, sc := range appCfg.Storage {
+		types = append(types, sc.Type)
+	}
+	return nil, fmt.Errorf("backend %q not configured for %s (available: %v)", backendType, appCfg.AppType, types)
+}
+
+// formatSize returns a human-readable size string.
+func formatSize(bytes int64) string {
+	switch {
+	case bytes >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(1<<30))
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", bytes)
 	}
 }
