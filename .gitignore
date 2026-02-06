@@ -1,0 +1,18 @@
+# Binary
+backuparr
+
+# Config with real credentials
+config.yml
+
+# Backup output
+backups/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
