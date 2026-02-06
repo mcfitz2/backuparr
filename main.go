@@ -16,6 +16,7 @@ import (
 	"backuparr/sonarr"
 	"backuparr/storage"
 	"backuparr/storage/local"
+	pbsbackend "backuparr/storage/pbs"
 	s3backend "backuparr/storage/s3"
 )
 
@@ -157,7 +158,20 @@ func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
 			}
 			backends = append(backends, backend)
 		case "pbs":
-			return nil, fmt.Errorf("PBS backend not yet implemented")
+			pbsCfg := pbsbackend.Config{
+				Server:      cfg.Server,
+				Port:        cfg.Port,
+				Datastore:   cfg.Datastore,
+				Namespace:   cfg.Namespace,
+				Username:    cfg.Username,
+				Password:    cfg.Password,
+				Fingerprint: cfg.Fingerprint,
+			}
+			backend, err := pbsbackend.New(pbsCfg)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create PBS backend: %w", err)
+			}
+			backends = append(backends, backend)
 		default:
 			return nil, fmt.Errorf("unsupported storage type: %s", cfg.Type)
 		}
