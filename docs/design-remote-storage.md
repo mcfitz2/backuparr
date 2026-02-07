@@ -2,11 +2,11 @@
 
 ## Overview
 
-Backuparr currently supports backing up Sonarr/Radarr instances to the local filesystem. This document proposes adding remote storage backends so backups can be uploaded directly to S3-compatible object stores and Proxmox Backup Server (PBS). Network filesystems (CIFS/NFS) are out of scope — users mount them and use the existing local path.
+Backuparr currently supports backing up Sonarr/Radarr instances to the local filesystem. This document proposes adding remote storage backends so backups can be uploaded directly to S3-compatible object stores. Network filesystems (CIFS/NFS) are out of scope — users mount them and use the existing local path.
 
 ## Goals
 
-1. **Pluggable storage backends** — a single interface that S3, PBS, and future backends implement.
+1. **Pluggable storage backends** — a single interface that S3 and future backends implement.
 2. **Retention management** — each backend enforces the retention policy defined in config.
 3. **Restore from remote** — pull a specific backup from remote storage and restore it.
 4. **Multiple destinations** — a single app can back up to several destinations simultaneously.
@@ -31,8 +31,6 @@ storage/
   storage.go        # Interface + types
   s3/
     s3.go           # S3 backend
-  pbs/
-    pbs.go          # Proxmox Backup Server backend
   local/
     local.go        # Local filesystem backend (refactored from main.go)
 ```
@@ -95,13 +93,13 @@ The flow stays the same — the `backup.Client` (Sonarr/Radarr) produces a backu
 └──────────────┘                                 │
                                                  │  for each destination:
                                     ┌────────────┼────────────┐
-                                    ▼            ▼            ▼
-                              ┌──────────┐ ┌──────────┐ ┌──────────┐
-                              │  local/  │ │   s3/    │ │   pbs/   │
-                              │ Backend  │ │ Backend  │ │ Backend  │
-                              └──────────┘ └──────────┘ └──────────┘
-                                    │            │            │
-                              ApplyRetention  ApplyRetention  ApplyRetention
+                                    ▼            ▼            
+                              ┌──────────┐ ┌──────────┐
+                              │  local/  │ │   s3/    │
+                              │ Backend  │ │ Backend  │
+                              └──────────┘ └──────────┘
+                                    │            │
+                              ApplyRetention  ApplyRetention
 ```
 
 The `backup.Client` interface does **not** change. `BackupToRemote` / `RestoreFromRemote` are removed — the orchestrator handles routing. The simplified interface becomes:
@@ -159,63 +157,6 @@ storage:
 
 ---
 
-## Backend: Proxmox Backup Server
-
-### Background
-
-PBS stores backups as deduplicated, encrypted chunks with built-in GC and verification. It exposes an HTTP API and also has a CLI tool `proxmox-backup-client`. PBS is commonly used for VM/CT backups but also supports generic file-level archives via its "host" backup type.
-
-### Approach
-
-Use the **PBS REST API** directly over HTTPS:
-
-1. **Authentication** — `POST /api2/json/access/ticket` with username/password (or API token). Returns a `PBSAuthCookie` + `CSRFPreventionToken`.
-2. **Upload** — PBS uses a chunked upload protocol:
-   - `POST /api2/json/admin/datastore/{store}/upload-backup-log` for metadata
-   - The actual upload uses the `pxar` archive format or raw fixed-index/dynamic-index
-   - For simplicity, use **`proxmox-backup-client backup`** CLI as the transport (similar to how we use `pg_dump`)
-3. **List** — `GET /api2/json/admin/datastore/{store}/snapshots?backup-type=host&backup-id={appName}`
-3. **Download** — `proxmox-backup-client restore` or the equivalent API calls
-4. **Delete** — `DELETE /api2/json/admin/datastore/{store}/snapshots` with the snapshot path
-
-### Why Use the CLI
-
-PBS's upload protocol is complex — it chunks data, computes checksums, deduplicates against the datastore's chunk index, and writes catalog metadata. Reimplementing this in Go would be a large effort with no benefit. The `proxmox-backup-client` binary handles all of this and is available on any Proxmox host or can be installed standalone from the PBS repository.
-
-This is the same pragmatic approach we use for `pg_dump`/`psql`.
-
-### Implementation Notes
-
-```go
-// Backup: pipe the zip to proxmox-backup-client via stdin
-// proxmox-backup-client backup - --backup-type host --backup-id sonarr \
-//   --repository <user>@<server>:<datastore>
-
-// Restore: get the archive back via stdout
-// proxmox-backup-client restore <snapshot> - --repository <user>@<server>:<datastore>
-```
-
-- PBS deduplication means daily backups of similar data are extremely space-efficient.
-- PBS handles retention natively via prune jobs, but we can also call the prune API to keep behavior consistent with other backends.
-- PBS verification (`verify` endpoint) can be called after upload for integrity checking.
-
-### Configuration
-
-```yaml
-storage:
-  - type: pbs
-    server: "pbs.example.com"
-    port: 8007                   # default PBS port
-    datastore: "backups"
-    namespace: ""                # optional PBS namespace
-    username: "backup@pbs"
-    password: "secret"           # or tokenId + tokenSecret
-    fingerprint: "AA:BB:CC:..."  # PBS server TLS fingerprint
-    verify: true                 # optional, verify backup after upload
-```
-
----
-
 ## Backend: Local Filesystem
 
 Refactor the existing `backupToLocal()` in `main.go` into a proper `storage.Backend` implementation so all backends are treated uniformly.
@@ -258,12 +199,6 @@ appConfigs:
       - type: s3
         bucket: "my-backups"
         region: "us-east-1"
-      - type: pbs
-        server: "pbs.example.com"
-        datastore: "app-backups"
-        username: "backup@pbs"
-        password: "secret"
-        fingerprint: "AA:BB:CC:..."
 
   - appType: radarr
     connection:
@@ -297,12 +232,10 @@ The `RetentionPolicy` fields map to time-based buckets:
 | `keepMonthly` | Keep one backup per month for the last N months  |
 | `keepYearly`  | Keep one backup per year for the last N years    |
 
-The algorithm (modeled after restic/PBS/Borg):
+The algorithm (modeled after restic/Borg):
 1. List all backups for the app, sorted by `CreatedAt` descending.
 2. Mark backups to keep based on each bucket (a backup can satisfy multiple buckets).
 3. Delete unmarked backups.
-
-For PBS, we can optionally delegate to PBS's built-in prune API since it implements the same algorithm natively.
 
 ---
 
@@ -380,13 +313,7 @@ For interactive use, `backuparr restore --app sonarr --backend s3` with no `--ba
 - Integration test with MinIO container
 - Support custom endpoints for S3-compatible stores
 
-### Phase 3: PBS Backend
-- Implement `storage/pbs` using `proxmox-backup-client` CLI
-- Detect CLI availability at startup
-- Integration test with PBS container (if feasible) or mock
-- Support API token auth as alternative to password
-
-### Phase 4: CLI for Restore
+### Phase 3: CLI for Restore
 - Add `restore` subcommand
 - List backups from a backend
 - Select and restore
@@ -406,5 +333,3 @@ For interactive use, `backuparr restore --app sonarr --backend s3` with no `--ba
 3. **Concurrency** — Uploads are sequential for now (one backend at a time, one app at a time). The orchestrator loop is structured so that swapping in `errgroup` or goroutine fan-out later is a minimal change — each `backend.Upload()` call is independent with no shared state.
 
 4. **Notifications** — Out of scope. May be revisited as a separate feature.
-
-5. **PBS namespace support** — Supported from the start. The `namespace` field in PBS config maps to the `--ns` flag on `proxmox-backup-client`. Defaults to the root namespace when omitted.

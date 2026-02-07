@@ -29,17 +29,7 @@ appConfigs:
       #   endpoint: ""               # custom endpoint for MinIO/R2/B2/Wasabi
       #   accessKeyId: ""            # optional, falls back to AWS credential chain
       #   secretAccessKey: ""
-      #   storageClass: STANDARD     # STANDARD, STANDARD_IA, DEEP_ARCHIVE, etc.
-      # - type: pbs
-      #   server: pbs.example.com    # PBS server hostname or IP
-      #   port: 8007                 # default 8007
-      #   datastore: backups         # PBS datastore name
-      #   namespace: ""              # optional PBS namespace
-      #   username: backup@pbs       # default root@pam; API tokens: user@pbs!token
-      #   password: ""               # password or API token secret
-      #   fingerprint: "AA:BB:CC:..."  # PBS server TLS fingerprint
-
-  - appType: radarr
+      #   storageClass: STANDARD     # STANDARD, STANDARD_IA, DEEP_ARCHIVE, etc.\n\n  - appType: radarr
     connection:
       apiKey: "your-radarr-api-key"
       url: "http://localhost:7878"

@@ -20,7 +20,6 @@ import (
 	"backuparr/sonarr"
 	"backuparr/storage"
 	"backuparr/storage/local"
-	pbsbackend "backuparr/storage/pbs"
 	s3backend "backuparr/storage/s3"
 )
 
@@ -67,12 +66,12 @@ type PostgresOverride struct {
 
 // StorageConfig defines a storage backend destination.
 type StorageConfig struct {
-	Type string `yaml:"type"` // "local", "s3", "pbs"
+	Type string `yaml:"type"` // "local", "s3"
 
 	// Local backend
 	Path string `yaml:"path,omitempty"`
 
-	// S3 backend (future)
+	// S3 backend
 	Bucket          string `yaml:"bucket,omitempty"`
 	Prefix          string `yaml:"prefix,omitempty"`
 	Region          string `yaml:"region,omitempty"`
@@ -80,16 +79,6 @@ type StorageConfig struct {
 	AccessKeyID     string `yaml:"accessKeyId,omitempty"`
 	SecretAccessKey string `yaml:"secretAccessKey,omitempty"`
 	StorageClass    string `yaml:"storageClass,omitempty"`
-
-	// PBS backend (future)
-	Server      string `yaml:"server,omitempty"`
-	Port        int    `yaml:"port,omitempty"`
-	Datastore   string `yaml:"datastore,omitempty"`
-	Namespace   string `yaml:"namespace,omitempty"`
-	Username    string `yaml:"username,omitempty"`
-	Password    string `yaml:"password,omitempty"`
-	Fingerprint string `yaml:"fingerprint,omitempty"`
-	Verify      bool   `yaml:"verify,omitempty"`
 }
 
 func parseConfig(path string) (BackuparrConfig, error) {
@@ -124,19 +113,13 @@ func configPath() string {
 // external tools are available before any work begins. This avoids partial
 // failures mid-backup or mid-restore due to a missing CLI tool.
 func preflightCheck(config BackuparrConfig) error {
-	var needPgDump, needPsql, needPBS bool
+	var needPgDump, needPsql bool
 
 	for _, app := range config.AppConfigs {
 		// If any app has an explicit postgres override, we'll need pg tools
 		if app.Postgres != nil {
 			needPgDump = true
 			needPsql = true
-		}
-
-		for _, sc := range app.Storage {
-			if sc.Type == "pbs" {
-				needPBS = true
-			}
 		}
 	}
 
@@ -150,11 +133,6 @@ func preflightCheck(config BackuparrConfig) error {
 	if needPsql {
 		if _, err := exec.LookPath("psql"); err != nil {
 			missing = append(missing, "psql (required for PostgreSQL restore)")
-		}
-	}
-	if needPBS {
-		if _, err := exec.LookPath("proxmox-backup-client"); err != nil {
-			missing = append(missing, "proxmox-backup-client (required for PBS storage backend)")
 		}
 	}
 
@@ -220,21 +198,6 @@ func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
 			backend, err := s3backend.New(context.Background(), s3cfg)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create S3 backend: %w", err)
-			}
-			backends = append(backends, backend)
-		case "pbs":
-			pbsCfg := pbsbackend.Config{
-				Server:      cfg.Server,
-				Port:        cfg.Port,
-				Datastore:   cfg.Datastore,
-				Namespace:   cfg.Namespace,
-				Username:    cfg.Username,
-				Password:    cfg.Password,
-				Fingerprint: cfg.Fingerprint,
-			}
-			backend, err := pbsbackend.New(pbsCfg)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create PBS backend: %w", err)
 			}
 			backends = append(backends, backend)
 		default:
@@ -329,7 +292,7 @@ Commands:
 
 Restore flags:
   --app <name>            App to restore (e.g. sonarr, radarr) [required]
-  --backend <type>        Storage backend to restore from (e.g. local, s3, pbs) [required]
+  --backend <type>        Storage backend to restore from (e.g. local, s3) [required]
   --backup <key>          Specific backup key to restore
   --latest                Restore the most recent backup
 
@@ -386,7 +349,7 @@ func runBackupAll() {
 func runRestoreCLI() {
 	fs := flag.NewFlagSet("restore", flag.ExitOnError)
 	appName := fs.String("app", "", "App to restore (e.g. sonarr, radarr)")
-	backendType := fs.String("backend", "", "Storage backend to restore from (e.g. local, s3, pbs)")
+	backendType := fs.String("backend", "", "Storage backend to restore from (e.g. local, s3)")
 	backupKey := fs.String("backup", "", "Specific backup key to restore")
 	latest := fs.Bool("latest", false, "Restore the most recent backup")
 	fs.Parse(os.Args[2:])
@@ -467,7 +430,7 @@ func runRestoreCLI() {
 func runListCLI() {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	appName := fs.String("app", "", "App to list backups for (e.g. sonarr, radarr)")
-	backendType := fs.String("backend", "", "Storage backend to list from (e.g. local, s3, pbs)")
+	backendType := fs.String("backend", "", "Storage backend to list from (e.g. local, s3)")
 	fs.Parse(os.Args[2:])
 
 	if *appName == "" || *backendType == "" {

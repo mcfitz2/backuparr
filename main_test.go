@@ -78,7 +78,7 @@ func TestFormatSize(t *testing.T) {
 }
 
 func TestPreflightCheck_NoTools(t *testing.T) {
-	// Config with no postgres and no PBS — should always pass
+	// Config with no postgres — should always pass
 	config := BackuparrConfig{
 		AppConfigs: []AppConfig{
 			{
@@ -113,41 +113,22 @@ func TestPreflightCheck_PostgresTools(t *testing.T) {
 	}
 }
 
-func TestPreflightCheck_PBSTool(t *testing.T) {
-	config := BackuparrConfig{
-		AppConfigs: []AppConfig{
-			{
-				AppType: "sonarr",
-				Storage: []StorageConfig{{Type: "pbs", Server: "pbs.local", Datastore: "store"}},
-			},
-		},
-	}
-	err := preflightCheck(config)
-	// proxmox-backup-client is unlikely to be installed in dev/CI
-	if err != nil {
-		if !strings.Contains(err.Error(), "proxmox-backup-client") {
-			t.Errorf("expected proxmox-backup-client error, got: %v", err)
-		}
-	}
-}
-
 func TestPreflightCheck_AllMissing(t *testing.T) {
 	config := BackuparrConfig{
 		AppConfigs: []AppConfig{
 			{
 				AppType:  "sonarr",
 				Postgres: &PostgresOverride{Host: "db.local"},
-				Storage:  []StorageConfig{{Type: "pbs", Server: "pbs.local", Datastore: "store"}},
+				Storage:  []StorageConfig{{Type: "local", Path: "./backups"}},
 			},
 		},
 	}
 	err := preflightCheck(config)
 	if err != nil {
-		// Should mention all missing tools
+		// Should mention postgres tools if missing
 		msg := err.Error()
-		// At minimum proxmox-backup-client will be missing
-		if !strings.Contains(msg, "proxmox-backup-client") {
-			t.Errorf("expected proxmox-backup-client in error, got: %v", err)
+		if !strings.Contains(msg, "pg_dump") && !strings.Contains(msg, "psql") {
+			t.Errorf("expected postgres tool errors, got: %v", err)
 		}
 	}
 }
