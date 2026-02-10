@@ -21,6 +21,7 @@ import (
 	"backuparr/storage"
 	"backuparr/storage/local"
 	s3backend "backuparr/storage/s3"
+	"backuparr/truenas"
 )
 
 // BackuparrConfig is the top-level configuration.
@@ -161,6 +162,8 @@ func createClient(cfg AppConfig) (backup.Client, error) {
 		return sonarr.NewSonarrClient(cfg.Connection.URL, cfg.Connection.APIKey, cfg.Connection.Username, cfg.Connection.Password, pgOverride)
 	case "radarr":
 		return radarr.NewRadarrClient(cfg.Connection.URL, cfg.Connection.APIKey, cfg.Connection.Username, cfg.Connection.Password, pgOverride)
+	case "truenas":
+		return truenas.NewClient(cfg.Connection.URL, cfg.Connection.APIKey), nil
 	default:
 		return nil, fmt.Errorf("unsupported app type: %s", cfg.AppType)
 	}
@@ -291,13 +294,13 @@ Commands:
   help                    Show this help message
 
 Restore flags:
-  --app <name>            App to restore (e.g. sonarr, radarr) [required]
+  --app <name>            App to restore (e.g. sonarr, radarr, truenas) [required]
   --backend <type>        Storage backend to restore from (e.g. local, s3) [required]
   --backup <key>          Specific backup key to restore
   --latest                Restore the most recent backup
 
 List flags:
-  --app <name>            App to list backups for [required]
+  --app <name>            App to list backups for (e.g. sonarr, radarr, truenas) [required]
   --backend <type>        Storage backend to list from [required]
 
 Environment:

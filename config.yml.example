@@ -41,3 +41,14 @@ appConfigs:
     storage:
       - type: local
         path: ./backups
+  # TrueNAS Scale configuration backup (via JSON-RPC WebSocket API)
+  # - appType: truenas
+  #   connection:
+  #     apiKey: "1-your-truenas-api-key"   # Created in TrueNAS UI: Credentials → API Keys
+  #     url: "http://192.168.1.136"        # TrueNAS web UI URL
+  #   retention:
+  #     keepLast: 5
+  #     keepDaily: 7
+  #   storage:
+  #     - type: local
+  #       path: ./backups
