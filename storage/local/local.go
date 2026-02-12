@@ -18,6 +18,7 @@ var _ storage.Backend = (*LocalBackend)(nil)
 // LocalBackend stores backups on a local filesystem path.
 type LocalBackend struct {
 	basePath string
+	name     string
 }
 
 // New creates a new local storage backend rooted at basePath.
@@ -25,9 +26,16 @@ func New(basePath string) *LocalBackend {
 	return &LocalBackend{basePath: basePath}
 }
 
+func (b *LocalBackend) Type() string { return "local" }
+
 func (b *LocalBackend) Name() string {
-	return "local"
+	if b.name != "" {
+		return b.name
+	}
+	return b.Type()
 }
+
+func (b *LocalBackend) SetName(name string) { b.name = name }
 
 // Upload writes backup data to <basePath>/<appName>/<fileName>.
 func (b *LocalBackend) Upload(ctx context.Context, appName string, fileName string, data io.Reader, size int64) (*storage.BackupMetadata, error) {

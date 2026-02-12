@@ -1,9 +1,9 @@
-.PHONY: generate generate-sonarr generate-radarr build clean test-integration test-containers-up test-containers-down tools test-s3 test-s3-up test-s3-down test-unit
+.PHONY: generate generate-sonarr generate-radarr generate-prowlarr build build-sidecar clean test-integration test-containers-up test-containers-down tools test-s3 test-s3-up test-s3-down test-unit test-sidecar
 
 GOBIN := $(shell go env GOPATH)/bin
 
 # Generate all API clients
-generate: generate-sonarr generate-radarr
+generate: generate-sonarr generate-radarr generate-prowlarr
 
 # Generate Sonarr API client
 generate-sonarr:
@@ -15,9 +15,18 @@ generate-radarr:
 	@echo "Generating Radarr API client..."
 	cd radarr && go generate
 
+# Generate Prowlarr API client
+generate-prowlarr:
+	@echo "Generating Prowlarr API client..."
+	cd prowlarr && go generate
+
 # Build the application
 build:
 	go build -o backuparr .
+
+# Build the sidecar Docker image
+build-sidecar:
+	docker build -f Dockerfile.sidecar -t backuparr-sidecar:dev .
 
 # Clean build artifacts
 clean:
@@ -36,21 +45,24 @@ tools:
 	@echo "Installing gotestfmt..."
 	go install github.com/gotesttools/gotestfmt/v2/cmd/gotestfmt@latest
 
-# Start test containers (PostgreSQL + Sonarr/Radarr instances)
+# Start test containers (PostgreSQL + Sonarr/Radarr instances + Sidecars)
 test-containers-up:
 	@echo "Starting test containers..."
-	cd integration-tests && docker compose up -d
-	@echo "Waiting for containers to be healthy (up to 2 minutes)..."
-	@for i in 1 2 3 4 5 6 7 8 9 10 11 12; do \
-		HEALTHY=$$(docker inspect --format='{{.State.Health.Status}}' sonarr-sqlite sonarr-postgres radarr-sqlite radarr-postgres 2>/dev/null | grep -c healthy); \
-		if [ "$$HEALTHY" -eq 4 ]; then \
+	cd integration-tests && docker compose up -d --build
+	@echo "Waiting for containers to be healthy (up to 3 minutes)..."
+	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do \
+		HEALTHY=$$(docker inspect --format='{{.State.Health.Status}}' \
+			sonarr-sqlite sonarr-postgres radarr-sqlite radarr-postgres prowlarr-sqlite \
+			nzbget nzbget-sidecar transmission transmission-sidecar overseerr overseerr-sidecar \
+			2>/dev/null | grep -c healthy); \
+		if [ "$$HEALTHY" -eq 11 ]; then \
 			echo "All containers are healthy!"; \
 			break; \
 		fi; \
-		echo "Waiting... ($$HEALTHY/4 healthy)"; \
+		echo "Waiting... ($$HEALTHY/11 healthy)"; \
 		sleep 10; \
 	done
-	@docker ps --format "table {{.Names}}\t{{.Status}}" | grep -E "(sonarr|radarr)"
+	@docker ps --format "table {{.Names}}\t{{.Status}}" | grep -E "(sonarr|radarr|prowlarr|nzbget|transmission|overseerr)"
 
 # Stop test containers and remove volumes
 test-containers-down:
@@ -115,3 +127,8 @@ test-s3: test-s3-down test-s3-up
 	@echo "Running S3 integration tests..."
 	set -o pipefail; S3_TEST=1 go test -json -v ./storage/s3/... -timeout 5m 2>&1 | $(GOBIN)/gotestfmt
 	@$(MAKE) test-s3-down
+
+# Run sidecar integration tests only
+test-sidecar:
+	@echo "Running sidecar integration tests..."
+	set -o pipefail; INTEGRATION_TEST=1 go test -json -v -run "^TestSidecar" ./integration-tests/... -timeout 15m 2>&1 | $(GOBIN)/gotestfmt

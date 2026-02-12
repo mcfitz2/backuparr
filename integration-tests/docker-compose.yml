@@ -275,6 +275,195 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ============================================
+  # Prowlarr Instance
+  # ============================================
+
+  # Prowlarr with SQLite (Prowlarr does not support PostgreSQL)
+  prowlarr-sqlite:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr-sqlite
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - prowlarr-sqlite-config:/config
+    entrypoint: |
+      /bin/bash -c '
+        if [ ! -f /config/config.xml ]; then
+          cat > /config/config.xml << "EOF"
+      <Config>
+        <BindAddress>*</BindAddress>
+        <Port>9696</Port>
+        <SslPort>6969</SslPort>
+        <EnableSsl>False</EnableSsl>
+        <LaunchBrowser>False</LaunchBrowser>
+        <ApiKey>prowlarrsqlitetestkey123</ApiKey>
+        <AuthenticationMethod>None</AuthenticationMethod>
+        <AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>
+        <Branch>main</Branch>
+        <LogLevel>info</LogLevel>
+        <SslCertPath></SslCertPath>
+        <SslCertPassword></SslCertPassword>
+        <UrlBase></UrlBase>
+        <InstanceName>Prowlarr-SQLite-Test</InstanceName>
+        <UpdateMechanism>Docker</UpdateMechanism>
+      </Config>
+      EOF
+          chown 1000:1000 /config/config.xml
+        fi
+        exec /init
+      '
+    ports:
+      - "9696:9696"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ============================================
+  # Sidecar Test Apps + Sidecars
+  # ============================================
+
+  # --- NZBGet ---
+  nzbget:
+    image: lscr.io/linuxserver/nzbget:latest
+    container_name: nzbget
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - nzbget-config:/config
+    ports:
+      - "6789:6789"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6789"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  nzbget-sidecar:
+    build:
+      context: ..
+      dockerfile: Dockerfile.sidecar
+    container_name: nzbget-sidecar
+    environment:
+      BACKUP_PATH: /data
+      API_KEY: nzbget-sidecar-test-key
+      API_PORT: "8484"
+      EXCLUDE_PATTERNS: "*.log,logs/*"
+    volumes:
+      - nzbget-config:/data:ro
+    ports:
+      - "8485:8484"
+    depends_on:
+      nzbget:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--header=X-Api-Key: nzbget-sidecar-test-key", "http://localhost:8484/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- Transmission ---
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - transmission-config:/config
+    ports:
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/transmission/web/"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  transmission-sidecar:
+    build:
+      context: ..
+      dockerfile: Dockerfile.sidecar
+    container_name: transmission-sidecar
+    environment:
+      BACKUP_PATH: /data
+      API_KEY: transmission-sidecar-test-key
+      API_PORT: "8484"
+      EXCLUDE_PATTERNS: "*.log,logs/*"
+    volumes:
+      - transmission-config:/data:ro
+    ports:
+      - "8486:8484"
+    depends_on:
+      transmission:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--header=X-Api-Key: transmission-sidecar-test-key", "http://localhost:8484/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- Overseerr ---
+  overseerr:
+    image: lscr.io/linuxserver/overseerr:latest
+    container_name: overseerr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    volumes:
+      - overseerr-config:/config
+    ports:
+      - "5055:5055"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5055/api/v1/status"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped
+
+  overseerr-sidecar:
+    build:
+      context: ..
+      dockerfile: Dockerfile.sidecar
+    container_name: overseerr-sidecar
+    environment:
+      BACKUP_PATH: /data
+      API_KEY: overseerr-sidecar-test-key
+      API_PORT: "8484"
+      EXCLUDE_PATTERNS: "*.log,logs/*,cache/*"
+    volumes:
+      - overseerr-config:/data:ro
+    ports:
+      - "8487:8484"
+    depends_on:
+      overseerr:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--header=X-Api-Key: overseerr-sidecar-test-key", "http://localhost:8484/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   sonarr-sqlite-config:
   sonarr-postgres-config:
@@ -282,3 +471,7 @@ volumes:
   radarr-sqlite-config:
   radarr-postgres-config:
   radarr-postgres-data:
+  prowlarr-sqlite-config:
+  nzbget-config:
+  transmission-config:
+  overseerr-config:

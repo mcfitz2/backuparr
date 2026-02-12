@@ -1,6 +1,7 @@
 package truenas
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -38,22 +39,64 @@ func TestName(t *testing.T) {
 	}
 }
 
-func TestRestoreNotImplemented(t *testing.T) {
-	c := NewClient("http://localhost", "key")
+func TestRestore(t *testing.T) {
+	restoreData := []byte("mock-truenas-config-restore-data")
+	mock := newMockTrueNAS("valid-api-key", nil)
+	defer mock.close()
+
+	c := NewClient(mock.server.URL, "valid-api-key")
+	err := c.Restore(context.Background(), bytes.NewReader(restoreData))
+	if err != nil {
+		t.Fatalf("Restore() error: %v", err)
+	}
+
+	// Verify the mock received the upload
+	if mock.uploadedData == nil {
+		t.Fatal("mock did not receive uploaded file")
+	}
+	if !bytes.Equal(mock.uploadedData, restoreData) {
+		t.Errorf("uploaded data = %q, want %q", mock.uploadedData, restoreData)
+	}
+}
+
+func TestRestore_AuthFailure(t *testing.T) {
+	mock := newMockTrueNAS("valid-api-key", nil)
+	defer mock.close()
+
+	c := NewClient(mock.server.URL, "wrong-key")
 	err := c.Restore(context.Background(), strings.NewReader("data"))
 	if err == nil {
-		t.Fatal("Restore() should return an error")
+		t.Fatal("Restore() should fail with wrong API key")
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("Restore() error = %q, want it to mention not yet implemented", err.Error())
+	// The upload itself should succeed (uses Bearer auth on HTTP),
+	// but the WebSocket job_wait auth should fail.
+	if !strings.Contains(err.Error(), "API key was rejected") {
+		t.Errorf("error = %q, want mention of API key rejection", err.Error())
+	}
+}
+
+func TestRestore_JobFailure(t *testing.T) {
+	mock := newMockTrueNAS("valid-api-key", nil)
+	mock.uploadJobFail = true
+	defer mock.close()
+
+	c := NewClient(mock.server.URL, "valid-api-key")
+	err := c.Restore(context.Background(), strings.NewReader("data"))
+	if err == nil {
+		t.Fatal("Restore() should fail when job fails")
+	}
+	if !strings.Contains(err.Error(), "config.upload job") {
+		t.Errorf("error = %q, want mention of job failure", err.Error())
 	}
 }
 
 type mockTrueNAS struct {
-	server     *httptest.Server
-	apiKey     string
-	upgrader   websocket.Upgrader
-	backupData []byte
+	server        *httptest.Server
+	apiKey        string
+	upgrader      websocket.Upgrader
+	backupData    []byte
+	uploadedData  []byte // captured from /_upload/
+	uploadJobFail bool   // if true, core.get_jobs returns FAILED state
 }
 
 func newMockTrueNAS(apiKey string, backupData []byte) *mockTrueNAS {
@@ -65,6 +108,7 @@ func newMockTrueNAS(apiKey string, backupData []byte) *mockTrueNAS {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/current", m.handleWebSocket)
 	mux.HandleFunc("/_download/", m.handleDownload)
+	mux.HandleFunc("/_upload/", m.handleUpload)
 	m.server = httptest.NewServer(mux)
 	return m
 }
@@ -105,6 +149,26 @@ func (m *mockTrueNAS) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				"id":      req.ID,
 				"result":  []any{int64(42), downloadPath},
 			})
+		case "core.get_jobs":
+			state := "SUCCESS"
+			errMsg := ""
+			if m.uploadJobFail {
+				state = "FAILED"
+				errMsg = "config.upload failed"
+			}
+			conn.WriteJSON(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": []map[string]any{{
+					"id":    77,
+					"state": state,
+					"error": errMsg,
+					"progress": map[string]any{
+						"percent":     100,
+						"description": "done",
+					},
+				}},
+			})
 		default:
 			conn.WriteJSON(map[string]any{
 				"jsonrpc": "2.0",
@@ -122,6 +186,34 @@ func (m *mockTrueNAS) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	w.Write(m.backupData)
+}
+
+func (m *mockTrueNAS) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse the multipart form
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, "bad multipart: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Read the uploaded file
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing file field: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer f.Close()
+
+	data, _ := io.ReadAll(f)
+	m.uploadedData = data
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"job_id": 77})
 }
 
 func TestBackup(t *testing.T) {

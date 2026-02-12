@@ -22,8 +22,14 @@ type BackupMetadata struct {
 
 // Backend is the interface every storage provider implements.
 type Backend interface {
-	// Name returns a human-readable backend identifier (e.g. "s3", "pbs", "local").
+	// Type returns the backend type identifier (e.g. "s3", "local").
+	Type() string
+	// Name returns a display name for this backend instance. Defaults to Type()
+	// but can be overridden in config to distinguish multiple backends of the
+	// same type (e.g. two local backends named "nas" and "usb").
 	Name() string
+	// SetName overrides the display name returned by Name().
+	SetName(name string)
 	// Upload stores backup data and returns metadata for the stored object.
 	Upload(ctx context.Context, appName string, fileName string, data io.Reader, size int64) (*BackupMetadata, error)
 	// Download retrieves a backup by key. Caller must close the reader.

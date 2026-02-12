@@ -8,6 +8,14 @@
 //  4. Receive [jobID, downloadURL]
 //  5. HTTP POST to <baseURL><downloadURL> to fetch the config backup
 //
+// Restore flow:
+//  1. HTTP POST multipart/form-data to <baseURL>/_upload/
+//     - field "data": JSON {"method": "config.upload", "params": []}
+//     - field "file": the backup tar/db file
+//  2. Response contains {"job_id": N}
+//  3. Monitor job via WebSocket core.job_wait(jobID)
+//  4. TrueNAS reboots automatically after successful upload
+//
 // The config.save method produces either:
 //   - A raw SQLite database file (when no options are set)
 //   - A tar archive containing the database + secrets (when secretseed
@@ -17,12 +25,14 @@
 package truenas
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -120,14 +130,91 @@ func (c *Client) Backup(ctx context.Context) (*backup.BackupResult, io.ReadClose
 	}, body, nil
 }
 
-// Restore is not yet supported for TrueNAS.
+// Restore uploads a configuration backup to TrueNAS via the /_upload endpoint
+// and waits for the config.upload job to complete.
 //
-// TrueNAS configuration restore requires the config.upload WebSocket method
-// which uses a different multipart upload flow. For now, use the TrueNAS
-// web UI (System > General > Manage Configuration > Upload Config) to
-// restore backups.
-func (c *Client) Restore(_ context.Context, _ io.Reader) error {
-	return fmt.Errorf("truenas restore is not yet implemented; use the TrueNAS web UI to restore config backups")
+// After a successful restore TrueNAS will reboot automatically (with a ~10s
+// delay). The caller should expect the connection to drop shortly after this
+// method returns.
+func (c *Client) Restore(ctx context.Context, backup io.Reader) error {
+	// Step 1: Upload the file via multipart POST to /_upload/
+	jobID, err := c.httpUpload(ctx, backup)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	log.Printf("[truenas] Config upload job %d started, waiting for completion...", jobID)
+
+	// Step 2: Wait for the job to finish via WebSocket
+	ws, err := c.dialWebSocket(ctx)
+	if err != nil {
+		return fmt.Errorf("websocket connect: %w", err)
+	}
+	defer ws.close()
+
+	var authed bool
+	if err := ws.call("auth.login_with_api_key", &authed, c.apiKey); err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	if !authed {
+		return fmt.Errorf("authentication failed: API key was rejected")
+	}
+
+	// Poll core.get_jobs until the upload job reaches a terminal state.
+	// We can't rely on core.job_wait because it is itself a job method and
+	// returns immediately via JSON-RPC before the target job finishes.
+	if err := c.waitForJob(ws, jobID); err != nil {
+		return fmt.Errorf("config.upload job %d failed: %w", jobID, err)
+	}
+
+	log.Printf("[truenas] Config restored successfully (job %d). TrueNAS will reboot shortly.", jobID)
+	return nil
+}
+
+// jobInfo represents a single job entry from core.get_jobs.
+type jobInfo struct {
+	ID       int64  `json:"id"`
+	State    string `json:"state"`
+	Error    string `json:"error,omitempty"`
+	Progress struct {
+		Percent     float64 `json:"percent"`
+		Description string  `json:"description"`
+	} `json:"progress"`
+}
+
+// waitForJob polls core.get_jobs until the given job reaches a terminal state
+// (SUCCESS, FAILED, or ABORTED). It logs progress updates along the way.
+func (c *Client) waitForJob(ws *wsClient, jobID int64) error {
+	var lastPct float64
+
+	for {
+		// core.get_jobs accepts query-filters; [["id", "=", jobID]] returns just our job.
+		var jobs []jobInfo
+		if err := ws.call("core.get_jobs", &jobs, [][]any{{"id", "=", jobID}}); err != nil {
+			return fmt.Errorf("query job %d: %w", jobID, err)
+		}
+
+		if len(jobs) == 0 {
+			return fmt.Errorf("job %d not found", jobID)
+		}
+
+		job := jobs[0]
+		if job.Progress.Percent != lastPct {
+			log.Printf("[truenas] Job %d: %.0f%% – %s", jobID, job.Progress.Percent, job.Progress.Description)
+			lastPct = job.Progress.Percent
+		}
+
+		switch job.State {
+		case "SUCCESS":
+			return nil
+		case "FAILED":
+			return fmt.Errorf("%s", job.Error)
+		case "ABORTED":
+			return fmt.Errorf("job was aborted")
+		}
+
+		// Poll every 2 seconds.
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // wsURL returns the WebSocket URL derived from the base HTTP URL.
@@ -290,4 +377,75 @@ func (c *Client) httpDownload(ctx context.Context, downloadURL string) (io.ReadC
 	}
 
 	return resp.Body, resp.ContentLength, nil
+}
+
+// uploadResponse is the JSON body returned by the /_upload/ endpoint.
+type uploadResponse struct {
+	JobID int64 `json:"job_id"`
+}
+
+// httpUpload posts a config backup file to the TrueNAS /_upload/ endpoint
+// as multipart/form-data and returns the resulting job ID.
+//
+// The multipart body contains two fields:
+//   - "data":  JSON object {"method": "config.upload", "params": []}
+//   - "file":  the backup file content
+func (c *Client) httpUpload(ctx context.Context, file io.Reader) (int64, error) {
+	// Build multipart body. We buffer it so we can set Content-Length and
+	// Content-Type on the request (TrueNAS rejects chunked uploads).
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+
+	// "data" must be the first field per the TrueNAS docs.
+	if err := w.WriteField("data", `{"method": "config.upload", "params": []}`); err != nil {
+		return 0, fmt.Errorf("write data field: %w", err)
+	}
+
+	filePart, err := w.CreateFormFile("file", "truenas-config.tar")
+	if err != nil {
+		return 0, fmt.Errorf("create file part: %w", err)
+	}
+	if _, err := io.Copy(filePart, file); err != nil {
+		return 0, fmt.Errorf("copy file data: %w", err)
+	}
+
+	if err := w.Close(); err != nil {
+		return 0, fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	uploadURL := c.baseURL + "/_upload/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &body)
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+
+	transport := &http.Transport{}
+	u, _ := url.Parse(uploadURL)
+	if u != nil && u.Scheme == "https" {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	}
+	httpClient := &http.Client{
+		Timeout:   5 * time.Minute,
+		Transport: transport,
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result uploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("decode response: %w", err)
+	}
+
+	return result.JobID, nil
 }

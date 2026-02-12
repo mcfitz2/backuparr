@@ -40,8 +40,9 @@ func NewSonarrClient(baseURL, apiKey, username, password string, pgOverride *bac
 	}
 
 	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Jar:     jar,
+		Timeout:   2 * time.Minute,
+		Jar:       jar,
+		Transport: backup.NewRetryTransport(nil),
 	}
 
 	client, err := NewClient(baseURL,
@@ -236,6 +237,8 @@ func (c *SonarrClient) Restore(ctx context.Context, backupData io.Reader) error 
 			return fmt.Errorf("failed to restore postgres databases: %w", err)
 		}
 		log.Printf("[%s] PostgreSQL databases restored successfully", c.Name())
+	} else {
+		log.Printf("[%s] No PostgreSQL dumps found in backup (SQLite-only backup)", c.Name())
 	}
 
 	// Now upload the backup to the API (handles config.xml)
@@ -274,8 +277,15 @@ func (c *SonarrClient) Restore(ctx context.Context, backupData io.Reader) error 
 	req.Header.Set("X-Api-Key", c.apiKey)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
+	// Use a client with longer timeout for uploads but share the cookie jar
+	uploadClient := &http.Client{
+		Timeout:   5 * time.Minute,
+		Jar:       c.httpClient.Jar,
+		Transport: backup.NewRetryTransport(nil),
+	}
+
 	// Send request
-	resp, err := c.httpClient.Do(req)
+	resp, err := uploadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to upload backup: %w", err)
 	}
@@ -472,8 +482,9 @@ func (c *SonarrClient) downloadBackup(ctx context.Context, backupPath *string, e
 
 	// Use a client with longer timeout for downloads but share the cookie jar
 	downloadClient := &http.Client{
-		Timeout: 5 * time.Minute,
-		Jar:     c.httpClient.Jar,
+		Timeout:   5 * time.Minute,
+		Jar:       c.httpClient.Jar,
+		Transport: backup.NewRetryTransport(nil),
 	}
 
 	resp, err := downloadClient.Do(req)
@@ -548,13 +559,22 @@ func (c *SonarrClient) loginWithForms(ctx context.Context) error {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := c.httpClient.Do(req)
+	// Use a client that doesn't follow redirects so we can inspect the response
+	noRedirectClient := &http.Client{
+		Timeout:   2 * time.Minute,
+		Jar:       c.httpClient.Jar,
+		Transport: backup.NewRetryTransport(nil),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := noRedirectClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("login request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// A successful login typically returns 200 or redirects (302)
 	if resp.StatusCode == 401 {
 		return fmt.Errorf("login failed: invalid credentials")
 	}
@@ -562,6 +582,25 @@ func (c *SonarrClient) loginWithForms(ctx context.Context) error {
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Verify the auth cookie was actually set — the *arr apps return 200/302
+	// even on failed login, but only set the auth cookie on success
+	parsedURL, err := url.Parse(c.baseURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse base URL: %w", err)
+	}
+
+	var hasAuthCookie bool
+	for _, cookie := range c.httpClient.Jar.Cookies(parsedURL) {
+		if strings.HasSuffix(cookie.Name, "Auth") {
+			hasAuthCookie = true
+			break
+		}
+	}
+
+	if !hasAuthCookie {
+		return fmt.Errorf("login failed: no auth cookie received (check username/password)")
 	}
 
 	log.Printf("[sonarr] Forms login successful")

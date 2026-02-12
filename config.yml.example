@@ -22,17 +22,33 @@ appConfigs:
     storage:
       - type: local
         path: ./backups
-      # - type: s3
+      # - name: offsite           # optional: give backends a name for use with --backend
+      #   type: s3
       #   bucket: my-backup-bucket
       #   prefix: backuparr          # optional, defaults to "backuparr"
       #   region: us-east-1
       #   endpoint: ""               # custom endpoint for MinIO/R2/B2/Wasabi
       #   accessKeyId: ""            # optional, falls back to AWS credential chain
       #   secretAccessKey: ""
-      #   storageClass: STANDARD     # STANDARD, STANDARD_IA, DEEP_ARCHIVE, etc.\n\n  - appType: radarr
+      #   storageClass: STANDARD     # STANDARD, STANDARD_IA, DEEP_ARCHIVE, etc.
+
+  - appType: radarr
     connection:
       apiKey: "your-radarr-api-key"
       url: "http://localhost:7878"
+      username: "admin"
+      password: "password"
+    retention:
+      keepLast: 5
+      keepDaily: 7
+    storage:
+      - type: local
+        path: ./backups
+
+  - appType: prowlarr
+    connection:
+      apiKey: "your-prowlarr-api-key"
+      url: "http://localhost:9696"
       username: "admin"
       password: "password"
     retention:
@@ -46,6 +62,48 @@ appConfigs:
   #   connection:
   #     apiKey: "1-your-truenas-api-key"   # Created in TrueNAS UI: Credentials → API Keys
   #     url: "http://192.168.1.136"        # TrueNAS web UI URL
+  #   retention:
+  #     keepLast: 5
+  #     keepDaily: 7
+  #   storage:
+  #     - type: local
+  #       path: ./backups
+
+  # Sidecar backup for apps without built-in backup APIs.
+  # The sidecar runs alongside the target app, sharing its data volume.
+  # It auto-detects SQLite databases and creates consistent backups.
+  #
+  # Docker Compose example for the sidecar:
+  #   transmission-backup:
+  #     image: backuparr-sidecar
+  #     environment:
+  #       BACKUP_PATH: /data
+  #       API_KEY: "your-secret-key"
+  #       EXCLUDE_PATTERNS: "*.log,cache/*"
+  #       DOCKER_CONTAINER: transmission     # optional: restart after restore
+  #       DOCKER_HOST: /var/run/docker.sock  # default
+  #     volumes:
+  #       - transmission-config:/data:ro     # share the app's config volume
+  #       - /var/run/docker.sock:/var/run/docker.sock  # optional: for restart
+  #     ports:
+  #       - "8484:8484"
+  #
+  # - appType: sidecar
+  #   name: transmission             # used for backup naming and CLI (--app transmission)
+  #   connection:
+  #     url: "http://transmission-backup:8484"
+  #     apiKey: "your-secret-key"    # must match the sidecar's API_KEY
+  #   retention:
+  #     keepLast: 5
+  #     keepDaily: 7
+  #   storage:
+  #     - type: local
+  #       path: ./backups
+  #
+  # - appType: sidecar
+  #   name: overseerr
+  #   connection:
+  #     url: "http://overseerr-backup:8484"
   #   retention:
   #     keepLast: 5
   #     keepDaily: 7

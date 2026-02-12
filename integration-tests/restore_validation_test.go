@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"backuparr/prowlarr"
 	"backuparr/radarr"
 	"backuparr/sonarr"
 )
@@ -824,5 +825,203 @@ func runRadarrValidation(t *testing.T, ctx context.Context, inst testInstance) {
 		t.Errorf("expected 1 movie, got %d", len(after))
 	} else {
 		t.Log("VALIDATION PASSED: PostgreSQL restore successful")
+	}
+}
+
+// TestRestoreValidationProwlarr tests that restoring a backup properly restores the original state
+// by adding a tag, backing up, adding more tags, then restoring and verifying.
+// Prowlarr uses tags as a simple data entity for validation (no external lookups needed).
+func TestRestoreValidationProwlarr(t *testing.T) {
+	if os.Getenv("INTEGRATION_TEST") == "" {
+		t.Skip("Skipping integration test. Set INTEGRATION_TEST=1 to run.")
+	}
+
+	// Find a Prowlarr instance to test with
+	var inst testInstance
+	found := false
+	for _, i := range testInstances {
+		if i.appType == "prowlarr" {
+			inst = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skip("No Prowlarr instance configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	apiKey, err := getAPIKeyFromContainer(inst.containerName)
+	if err != nil {
+		t.Fatalf("failed to get API key: %v", err)
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	// Helper to get all tags
+	getTags := func() ([]prowlarr.TagResource, error) {
+		req, _ := http.NewRequestWithContext(ctx, "GET", inst.url+"/api/v1/tag", nil)
+		req.Header.Set("X-Api-Key", apiKey)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		var tags []prowlarr.TagResource
+		if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+			return nil, err
+		}
+		return tags, nil
+	}
+
+	// Helper to add a tag
+	addTag := func(label string) (*prowlarr.TagResource, error) {
+		tag := prowlarr.TagResource{Label: &label}
+		body, _ := json.Marshal(tag)
+		req, _ := http.NewRequestWithContext(ctx, "POST", inst.url+"/api/v1/tag", bytes.NewReader(body))
+		req.Header.Set("X-Api-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("add tag failed: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			respBody, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("add tag failed with status %d: %s", resp.StatusCode, string(respBody))
+		}
+		var added prowlarr.TagResource
+		if err := json.NewDecoder(resp.Body).Decode(&added); err != nil {
+			return nil, fmt.Errorf("decode failed: %w", err)
+		}
+		return &added, nil
+	}
+
+	// Helper to delete a tag
+	deleteTag := func(id int32) error {
+		req, _ := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/api/v1/tag/%d", inst.url, id), nil)
+		req.Header.Set("X-Api-Key", apiKey)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		return nil
+	}
+
+	// Step 1: Clean up any existing tags
+	t.Log("Step 1: Cleaning up existing tags...")
+	existingTags, err := getTags()
+	if err != nil {
+		t.Fatalf("failed to get existing tags: %v", err)
+	}
+	for _, tag := range existingTags {
+		if tag.Id != nil {
+			_ = deleteTag(*tag.Id)
+		}
+	}
+
+	// Step 2: Add first tag
+	t.Log("Step 2: Adding first tag (test-backup-tag)...")
+	tag1, err := addTag("test-backup-tag")
+	if err != nil {
+		t.Fatalf("failed to add first tag: %v", err)
+	}
+	t.Logf("Added tag: %s (ID: %d)", *tag1.Label, *tag1.Id)
+
+	// Verify we have 1 tag
+	tagsAfterAdd1, err := getTags()
+	if err != nil {
+		t.Fatalf("failed to get tags: %v", err)
+	}
+	if len(tagsAfterAdd1) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(tagsAfterAdd1))
+	}
+
+	// Step 3: Create a backup
+	t.Log("Step 3: Creating backup...")
+	client := createClient(t, inst)
+	_, reader, err := client.Backup(ctx)
+	if err != nil {
+		t.Fatalf("failed to create backup: %v", err)
+	}
+	backupData, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		t.Fatalf("failed to read backup: %v", err)
+	}
+	t.Logf("Backup created: %d bytes", len(backupData))
+
+	// Step 4: Add second tag
+	t.Log("Step 4: Adding second tag (extra-tag-1)...")
+	tag2, err := addTag("extra-tag-1")
+	if err != nil {
+		t.Fatalf("failed to add second tag: %v", err)
+	}
+	t.Logf("Added tag: %s (ID: %d)", *tag2.Label, *tag2.Id)
+
+	// Step 5: Add third tag
+	t.Log("Step 5: Adding third tag (extra-tag-2)...")
+	tag3, err := addTag("extra-tag-2")
+	if err != nil {
+		t.Fatalf("failed to add third tag: %v", err)
+	}
+	t.Logf("Added tag: %s (ID: %d)", *tag3.Label, *tag3.Id)
+
+	// Verify we now have 3 tags
+	tagsAfterAdd3, err := getTags()
+	if err != nil {
+		t.Fatalf("failed to get tags: %v", err)
+	}
+	if len(tagsAfterAdd3) != 3 {
+		t.Fatalf("expected 3 tags, got %d", len(tagsAfterAdd3))
+	}
+	t.Logf("Current state: %d tags before restore", len(tagsAfterAdd3))
+
+	// Step 6: Restore from backup
+	t.Log("Step 6: Restoring from backup...")
+	err = client.Restore(ctx, bytes.NewReader(backupData))
+	if err != nil {
+		t.Fatalf("failed to restore: %v", err)
+	}
+
+	// Step 7: Wait for restart
+	t.Log("Step 7: Waiting for app to restart...")
+	time.Sleep(15 * time.Second)
+
+	// Wait for app to come back online
+	for i := 0; i < 20; i++ {
+		_, err := getTags()
+		if err == nil {
+			break
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	// Step 8: Verify the original state is restored (only 1 tag)
+	t.Log("Step 8: Verifying restored state...")
+	tagsAfterRestore, err := getTags()
+	if err != nil {
+		t.Fatalf("failed to get tags after restore: %v", err)
+	}
+
+	if len(tagsAfterRestore) != 1 {
+		t.Errorf("VALIDATION FAILED: expected 1 tag after restore, got %d", len(tagsAfterRestore))
+		for _, tag := range tagsAfterRestore {
+			t.Logf("  - %s (ID: %d)", *tag.Label, *tag.Id)
+		}
+	} else {
+		t.Logf("VALIDATION PASSED: Restored to original state with 1 tag")
+		if tagsAfterRestore[0].Label != nil && *tagsAfterRestore[0].Label == "test-backup-tag" {
+			t.Logf("  - Verified: %s", *tagsAfterRestore[0].Label)
+		} else {
+			label := ""
+			if tagsAfterRestore[0].Label != nil {
+				label = *tagsAfterRestore[0].Label
+			}
+			t.Errorf("VALIDATION FAILED: Expected tag 'test-backup-tag', got %q", label)
+		}
 	}
 }

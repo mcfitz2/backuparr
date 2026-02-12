@@ -16,7 +16,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"backuparr/backup"
+	"backuparr/prowlarr"
 	"backuparr/radarr"
+	"backuparr/sidecar"
 	"backuparr/sonarr"
 	"backuparr/storage"
 	"backuparr/storage/local"
@@ -32,6 +34,7 @@ type BackuparrConfig struct {
 // AppConfig configures a single application to back up.
 type AppConfig struct {
 	AppType    string            `yaml:"appType"`
+	Name       string            `yaml:"name,omitempty"` // optional display name; defaults to appType
 	Connection Connection        `yaml:"connection"`
 	Retention  RetentionPolicy   `yaml:"retention"`
 	Postgres   *PostgresOverride `yaml:"postgres,omitempty"`
@@ -67,7 +70,8 @@ type PostgresOverride struct {
 
 // StorageConfig defines a storage backend destination.
 type StorageConfig struct {
-	Type string `yaml:"type"` // "local", "s3"
+	Name string `yaml:"name,omitempty"` // optional display name; defaults to type
+	Type string `yaml:"type"`           // "local", "s3"
 
 	// Local backend
 	Path string `yaml:"path,omitempty"`
@@ -162,8 +166,16 @@ func createClient(cfg AppConfig) (backup.Client, error) {
 		return sonarr.NewSonarrClient(cfg.Connection.URL, cfg.Connection.APIKey, cfg.Connection.Username, cfg.Connection.Password, pgOverride)
 	case "radarr":
 		return radarr.NewRadarrClient(cfg.Connection.URL, cfg.Connection.APIKey, cfg.Connection.Username, cfg.Connection.Password, pgOverride)
+	case "prowlarr":
+		return prowlarr.NewProwlarrClient(cfg.Connection.URL, cfg.Connection.APIKey, cfg.Connection.Username, cfg.Connection.Password)
 	case "truenas":
 		return truenas.NewClient(cfg.Connection.URL, cfg.Connection.APIKey), nil
+	case "sidecar":
+		name := cfg.Name
+		if name == "" {
+			name = "sidecar"
+		}
+		return sidecar.NewClient(cfg.Connection.URL, cfg.Connection.APIKey, name)
 	default:
 		return nil, fmt.Errorf("unsupported app type: %s", cfg.AppType)
 	}
@@ -177,13 +189,14 @@ func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
 
 	var backends []storage.Backend
 	for _, cfg := range configs {
+		var b storage.Backend
 		switch cfg.Type {
 		case "local":
 			path := cfg.Path
 			if path == "" {
 				path = "./backups"
 			}
-			backends = append(backends, local.New(path))
+			b = local.New(path)
 		case "s3":
 			prefix := cfg.Prefix
 			if prefix == "" {
@@ -198,14 +211,16 @@ func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
 				SecretAccessKey: cfg.SecretAccessKey,
 				StorageClass:    cfg.StorageClass,
 			}
-			backend, err := s3backend.New(context.Background(), s3cfg)
+			var err error
+			b, err = s3backend.New(context.Background(), s3cfg)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create S3 backend: %w", err)
 			}
-			backends = append(backends, backend)
 		default:
 			return nil, fmt.Errorf("unsupported storage type: %s", cfg.Type)
 		}
+		b.SetName(storageConfigName(cfg))
+		backends = append(backends, b)
 	}
 	return backends, nil
 }
@@ -294,14 +309,14 @@ Commands:
   help                    Show this help message
 
 Restore flags:
-  --app <name>            App to restore (e.g. sonarr, radarr, truenas) [required]
-  --backend <type>        Storage backend to restore from (e.g. local, s3) [required]
+  --app <name>            App to restore (e.g. sonarr, radarr, prowlarr, truenas) [required]
+  --backend <name>        Storage backend name (defaults to type, e.g. local, s3) [required]
   --backup <key>          Specific backup key to restore
   --latest                Restore the most recent backup
 
 List flags:
-  --app <name>            App to list backups for (e.g. sonarr, radarr, truenas) [required]
-  --backend <type>        Storage backend to list from [required]
+  --app <name>            App to list backups for (e.g. sonarr, radarr, prowlarr, truenas) [required]
+  --backend <name>        Storage backend name (defaults to type, e.g. local, s3) [required]
 
 Environment:
   BACKUPARR_CONFIG        Path to config file (default: /config/config.yml)
@@ -311,6 +326,7 @@ Examples:
   backuparr backup                                    # Run backups (explicit)
   backuparr list --app sonarr --backend local         # List sonarr backups
   backuparr restore --app sonarr --backend s3 --latest
+  backuparr restore --app radarr --backend nas --latest  # Named backend
   backuparr restore --app sonarr --backend local --backup "sonarr/sonarr_2026-02-06T120000Z.zip"
 
 Docker:
@@ -351,13 +367,13 @@ func runBackupAll() {
 
 func runRestoreCLI() {
 	fs := flag.NewFlagSet("restore", flag.ExitOnError)
-	appName := fs.String("app", "", "App to restore (e.g. sonarr, radarr)")
-	backendType := fs.String("backend", "", "Storage backend to restore from (e.g. local, s3)")
+	appName := fs.String("app", "", "App to restore (e.g. sonarr, radarr, prowlarr)")
+	backendName := fs.String("backend", "", "Storage backend name (e.g. local, s3, nas)")
 	backupKey := fs.String("backup", "", "Specific backup key to restore")
 	latest := fs.Bool("latest", false, "Restore the most recent backup")
 	fs.Parse(os.Args[2:])
 
-	if *appName == "" || *backendType == "" {
+	if *appName == "" || *backendName == "" {
 		fmt.Fprintln(os.Stderr, "Error: --app and --backend are required")
 		fs.Usage()
 		os.Exit(1)
@@ -392,7 +408,7 @@ func runRestoreCLI() {
 	}
 
 	// Find and create the specific backend
-	backend, err := findBackend(appCfg, *backendType)
+	backend, err := findBackend(appCfg, *backendName)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -405,7 +421,7 @@ func runRestoreCLI() {
 			log.Fatalf("Failed to list backups: %v", err)
 		}
 		if len(backups) == 0 {
-			log.Fatalf("No backups found for %s on %s", *appName, *backendType)
+			log.Fatalf("No backups found for %s on %s", *appName, *backendName)
 		}
 		key = backups[0].Key
 		log.Printf("Selected latest backup: %s (created %s)", key, backups[0].CreatedAt.Format(time.RFC3339))
@@ -433,10 +449,10 @@ func runRestoreCLI() {
 func runListCLI() {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	appName := fs.String("app", "", "App to list backups for (e.g. sonarr, radarr)")
-	backendType := fs.String("backend", "", "Storage backend to list from (e.g. local, s3)")
+	backendName := fs.String("backend", "", "Storage backend name (e.g. local, s3, nas)")
 	fs.Parse(os.Args[2:])
 
-	if *appName == "" || *backendType == "" {
+	if *appName == "" || *backendName == "" {
 		fmt.Fprintln(os.Stderr, "Error: --app and --backend are required")
 		fs.Usage()
 		os.Exit(1)
@@ -456,7 +472,7 @@ func runListCLI() {
 	}
 
 	// Find and create the specific backend
-	backend, err := findBackend(appCfg, *backendType)
+	backend, err := findBackend(appCfg, *backendName)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -468,7 +484,7 @@ func runListCLI() {
 	}
 
 	if len(backups) == 0 {
-		fmt.Printf("No backups found for %s on %s\n", *appName, *backendType)
+		fmt.Printf("No backups found for %s on %s\n", *appName, *backendName)
 		return
 	}
 
@@ -483,35 +499,64 @@ func runListCLI() {
 }
 
 // findAppConfig looks up the AppConfig for the given app name.
+// It matches against the Name field first, then falls back to AppType.
 func findAppConfig(config BackuparrConfig, appName string) (AppConfig, error) {
 	for _, cfg := range config.AppConfigs {
-		if cfg.AppType == appName {
+		effectiveName := cfg.Name
+		if effectiveName == "" {
+			effectiveName = cfg.AppType
+		}
+		if effectiveName == appName {
 			return cfg, nil
 		}
 	}
 	var names []string
 	for _, cfg := range config.AppConfigs {
-		names = append(names, cfg.AppType)
+		if cfg.Name != "" {
+			names = append(names, cfg.Name)
+		} else {
+			names = append(names, cfg.AppType)
+		}
 	}
 	return AppConfig{}, fmt.Errorf("app %q not found in config (available: %v)", appName, names)
 }
 
-// findBackend creates a single storage backend of the given type from the app's config.
-func findBackend(appCfg AppConfig, backendType string) (storage.Backend, error) {
+// storageConfigName returns the effective name for a storage config entry.
+// If a custom name is set it takes precedence; otherwise the type is used.
+func storageConfigName(sc StorageConfig) string {
+	if sc.Name != "" {
+		return sc.Name
+	}
+	return sc.Type
+}
+
+// findBackend creates a single storage backend matching the given name from
+// the app's config. Returns an error if no match is found or if multiple
+// backends share the same effective name (ambiguous).
+func findBackend(appCfg AppConfig, backendName string) (storage.Backend, error) {
+	var matches []StorageConfig
 	for _, sc := range appCfg.Storage {
-		if sc.Type == backendType {
-			backends, err := createBackends([]StorageConfig{sc})
-			if err != nil {
-				return nil, err
-			}
-			return backends[0], nil
+		if storageConfigName(sc) == backendName {
+			matches = append(matches, sc)
 		}
 	}
-	var types []string
-	for _, sc := range appCfg.Storage {
-		types = append(types, sc.Type)
+
+	switch len(matches) {
+	case 0:
+		var names []string
+		for _, sc := range appCfg.Storage {
+			names = append(names, storageConfigName(sc))
+		}
+		return nil, fmt.Errorf("backend %q not configured for %s (available: %v)", backendName, appCfg.AppType, names)
+	case 1:
+		backends, err := createBackends(matches)
+		if err != nil {
+			return nil, err
+		}
+		return backends[0], nil
+	default:
+		return nil, fmt.Errorf("multiple backends match %q for %s; assign unique names in config", backendName, appCfg.AppType)
 	}
-	return nil, fmt.Errorf("backend %q not configured for %s (available: %v)", backendType, appCfg.AppType, types)
 }
 
 // formatSize returns a human-readable size string.

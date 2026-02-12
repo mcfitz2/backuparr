@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"backuparr/backup"
+	"backuparr/prowlarr"
 	"backuparr/radarr"
 	"backuparr/sonarr"
 )
@@ -67,6 +70,14 @@ var testInstances = []testInstance{
 		},
 		isPostgres: true,
 	},
+	{
+		name:          "prowlarr-sqlite",
+		containerName: "prowlarr-sqlite",
+		appType:       "prowlarr",
+		url:           "http://localhost:9696",
+		pgOverride:    nil,
+		isPostgres:    false,
+	},
 }
 
 // configXML is used to parse the API key from container config
@@ -107,6 +118,8 @@ func createClient(t *testing.T, inst testInstance) backup.Client {
 		client, err = sonarr.NewSonarrClient(inst.url, apiKey, "", "", inst.pgOverride)
 	case "radarr":
 		client, err = radarr.NewRadarrClient(inst.url, apiKey, "", "", inst.pgOverride)
+	case "prowlarr":
+		client, err = prowlarr.NewProwlarrClient(inst.url, apiKey, "", "")
 	default:
 		t.Fatalf("unknown app type: %s", inst.appType)
 	}
@@ -567,4 +580,158 @@ func TestRestorePostgres(t *testing.T) {
 			t.Logf("Post-restore backup contains %d PostgreSQL dump files (verified)", pgDumpCount2)
 		})
 	}
+}
+
+// TestBadCredentials verifies that using wrong credentials with forms auth
+// produces a clear error rather than silently failing and downloading HTML.
+// This test enables Forms auth on the prowlarr-sqlite instance via the API,
+// attempts a backup with wrong credentials, then restores auth to None.
+func TestBadCredentials(t *testing.T) {
+	if os.Getenv("INTEGRATION_TEST") == "" {
+		t.Skip("Skipping integration test. Set INTEGRATION_TEST=1 to run.")
+	}
+
+	// Use the prowlarr-sqlite instance
+	var inst testInstance
+	found := false
+	for _, i := range testInstances {
+		if i.appType == "prowlarr" {
+			inst = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skip("No prowlarr instance configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	apiKey, err := getAPIKeyFromContainer(inst.containerName)
+	if err != nil {
+		t.Fatalf("failed to get API key: %v", err)
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	// Helper to GET the current host config
+	getHostConfig := func() (map[string]interface{}, error) {
+		req, _ := http.NewRequestWithContext(ctx, "GET", inst.url+"/api/v1/config/host", nil)
+		req.Header.Set("X-Api-Key", apiKey)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		var config map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
+			return nil, err
+		}
+		return config, nil
+	}
+
+	// Helper to PUT host config update
+	updateHostConfig := func(config map[string]interface{}) error {
+		id := "1"
+		if idVal, ok := config["id"]; ok {
+			id = fmt.Sprintf("%v", idVal)
+		}
+		body, _ := json.Marshal(config)
+		req, _ := http.NewRequestWithContext(ctx, "PUT", fmt.Sprintf("%s/api/v1/config/host/%s", inst.url, id), bytes.NewReader(body))
+		req.Header.Set("X-Api-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			respBody, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("update host config failed: %d - %s", resp.StatusCode, string(respBody))
+		}
+		return nil
+	}
+
+	// Step 1: Get current host config so we can restore it later
+	t.Log("Step 1: Getting current host config...")
+	originalConfig, err := getHostConfig()
+	if err != nil {
+		t.Fatalf("failed to get host config: %v", err)
+	}
+	t.Logf("Current auth method: %v", originalConfig["authenticationMethod"])
+
+	// Step 2: Enable Forms auth with known credentials
+	t.Log("Step 2: Enabling Forms authentication...")
+	formsConfig := make(map[string]interface{})
+	for k, v := range originalConfig {
+		formsConfig[k] = v
+	}
+	formsConfig["authenticationMethod"] = "forms"
+	formsConfig["authenticationRequired"] = "enabled"
+	formsConfig["username"] = "testadmin"
+	formsConfig["password"] = "testpassword123"
+	formsConfig["passwordConfirmation"] = "testpassword123"
+
+	if err := updateHostConfig(formsConfig); err != nil {
+		t.Fatalf("failed to enable Forms auth: %v", err)
+	}
+	t.Log("Forms auth enabled with username=testadmin")
+
+	// Ensure we restore auth to None when done, regardless of test outcome
+	defer func() {
+		t.Log("Cleanup: Restoring auth to None...")
+		restoreConfig, err := getHostConfig()
+		if err != nil {
+			t.Logf("Warning: failed to get config for cleanup: %v", err)
+			return
+		}
+		restoreConfig["authenticationMethod"] = "none"
+		restoreConfig["authenticationRequired"] = "disabledForLocalAddresses"
+		if err := updateHostConfig(restoreConfig); err != nil {
+			t.Logf("Warning: failed to restore auth to None: %v", err)
+		} else {
+			t.Log("Cleanup: Auth restored to None")
+		}
+	}()
+
+	// Step 3: Try backup with WRONG credentials — should fail with auth error
+	t.Log("Step 3: Attempting backup with wrong credentials...")
+	badClient, err := prowlarr.NewProwlarrClient(inst.url, apiKey, "wronguser", "wrongpassword")
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, _, err = badClient.Backup(ctx)
+	if err == nil {
+		t.Fatal("FAIL: backup with wrong credentials should have returned an error")
+	}
+
+	t.Logf("Got expected error: %v", err)
+
+	// Verify the error message is about authentication, not a generic content-type error
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "unexpected content type: text/html") {
+		t.Errorf("FAIL: got HTML content-type error instead of auth error — login failure not properly detected.\nError: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "login failed") && !strings.Contains(errMsg, "auth cookie") && !strings.Contains(errMsg, "credentials") {
+		t.Errorf("FAIL: error message doesn't mention authentication failure.\nError: %s", errMsg)
+	}
+
+	t.Log("PASS: Wrong credentials correctly detected with clear error message")
+
+	// Step 4: Verify correct credentials still work
+	t.Log("Step 4: Verifying correct credentials work...")
+	goodClient, err := prowlarr.NewProwlarrClient(inst.url, apiKey, "testadmin", "testpassword123")
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	result, reader, err := goodClient.Backup(ctx)
+	if err != nil {
+		t.Fatalf("FAIL: backup with correct credentials failed: %v", err)
+	}
+	defer reader.Close()
+
+	t.Logf("PASS: Backup with correct credentials succeeded: %s (%d bytes)", result.Name, result.Size)
 }

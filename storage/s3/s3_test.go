@@ -75,13 +75,20 @@ func newTestBackend(t *testing.T, ctx context.Context) *S3Backend {
 	return backend
 }
 
-func TestS3Backend_Name(t *testing.T) {
+func TestS3Backend_Type(t *testing.T) {
 	skipUnlessS3(t)
 	ctx := context.Background()
 	createTestBucket(t, ctx)
 	backend := newTestBackend(t, ctx)
+	if backend.Type() != "s3" {
+		t.Errorf("Type() = %q, want %q", backend.Type(), "s3")
+	}
 	if backend.Name() != "s3" {
-		t.Errorf("Name() = %q, want %q", backend.Name(), "s3")
+		t.Errorf("Name() = %q, want %q (should default to type)", backend.Name(), "s3")
+	}
+	backend.SetName("offsite")
+	if backend.Name() != "offsite" {
+		t.Errorf("Name() after SetName = %q, want %q", backend.Name(), "offsite")
 	}
 }
 

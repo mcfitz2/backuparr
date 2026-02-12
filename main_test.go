@@ -132,3 +132,78 @@ func TestPreflightCheck_AllMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestStorageConfigName(t *testing.T) {
+	tests := []struct {
+		cfg  StorageConfig
+		want string
+	}{
+		{StorageConfig{Type: "local"}, "local"},
+		{StorageConfig{Name: "nas", Type: "local"}, "nas"},
+		{StorageConfig{Name: "offsite", Type: "s3"}, "offsite"},
+		{StorageConfig{Type: "s3"}, "s3"},
+	}
+	for _, tt := range tests {
+		got := storageConfigName(tt.cfg)
+		if got != tt.want {
+			t.Errorf("storageConfigName(%+v) = %q, want %q", tt.cfg, got, tt.want)
+		}
+	}
+}
+
+func TestFindBackend(t *testing.T) {
+	appCfg := AppConfig{
+		AppType: "sonarr",
+		Storage: []StorageConfig{
+			{Type: "local", Path: "./backups"},
+			{Name: "nas", Type: "local", Path: "/mnt/nas"},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		backendName string
+		wantName    string
+		wantErr     bool
+	}{
+		{"find by type default", "local", "local", false},
+		{"find by explicit name", "nas", "nas", false},
+		{"not found", "s3", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := findBackend(appCfg, tt.backendName)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if b.Name() != tt.wantName {
+				t.Errorf("backend.Name() = %q, want %q", b.Name(), tt.wantName)
+			}
+		})
+	}
+}
+
+func TestFindBackend_Ambiguous(t *testing.T) {
+	appCfg := AppConfig{
+		AppType: "sonarr",
+		Storage: []StorageConfig{
+			{Type: "local", Path: "./backups1"},
+			{Type: "local", Path: "./backups2"},
+		},
+	}
+
+	_, err := findBackend(appCfg, "local")
+	if err == nil {
+		t.Fatal("expected error for ambiguous backends")
+	}
+	if !strings.Contains(err.Error(), "multiple") {
+		t.Errorf("error = %q, want mention of multiple backends", err.Error())
+	}
+}

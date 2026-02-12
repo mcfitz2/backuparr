@@ -1,4 +1,4 @@
-package radarr
+package prowlarr
 
 import (
 	"bytes"
@@ -17,22 +17,21 @@ import (
 	"backuparr/backup"
 )
 
-// Ensure RadarrClient implements backup.Client
-var _ backup.Client = (*RadarrClient)(nil)
+// Ensure ProwlarrClient implements backup.Client
+var _ backup.Client = (*ProwlarrClient)(nil)
 
-// RadarrClient wraps the generated radarr.Client with API key authentication
-type RadarrClient struct {
+// ProwlarrClient wraps the generated prowlarr.Client with API key authentication
+type ProwlarrClient struct {
 	client     *Client
 	baseURL    string
 	apiKey     string
 	username   string
 	password   string
-	httpClient *http.Client           // Shared HTTP client with cookie jar for session auth
-	pgOverride *backup.PostgresConfig // Optional postgres config override
+	httpClient *http.Client // Shared HTTP client with cookie jar for session auth
 }
 
-// NewRadarrClient creates a new Radarr API client with API key authentication
-func NewRadarrClient(baseURL, apiKey, username, password string, pgOverride *backup.PostgresConfig) (*RadarrClient, error) {
+// NewProwlarrClient creates a new Prowlarr API client with API key authentication
+func NewProwlarrClient(baseURL, apiKey, username, password string) (*ProwlarrClient, error) {
 	// Create a cookie jar for session management
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -54,27 +53,26 @@ func NewRadarrClient(baseURL, apiKey, username, password string, pgOverride *bac
 		}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create radarr client: %w", err)
+		return nil, fmt.Errorf("failed to create prowlarr client: %w", err)
 	}
 
-	return &RadarrClient{
+	return &ProwlarrClient{
 		client:     client,
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		username:   username,
 		password:   password,
 		httpClient: httpClient,
-		pgOverride: pgOverride,
 	}, nil
 }
 
 // Name returns the application name
-func (c *RadarrClient) Name() string {
-	return "radarr"
+func (c *ProwlarrClient) Name() string {
+	return "prowlarr"
 }
 
 // Backup triggers a backup and returns the backup file content
-func (c *RadarrClient) Backup(ctx context.Context) (*backup.BackupResult, io.ReadCloser, error) {
+func (c *ProwlarrClient) Backup(ctx context.Context) (*backup.BackupResult, io.ReadCloser, error) {
 	// Trigger the backup command and wait for completion
 	if err := c.runBackupCommand(ctx); err != nil {
 		return nil, nil, fmt.Errorf("backup command failed: %w", err)
@@ -93,155 +91,40 @@ func (c *RadarrClient) Backup(ctx context.Context) (*backup.BackupResult, io.Rea
 	// Get the most recent backup (first in the list)
 	latest := backups[0]
 
-	// Download the backup file into memory
+	// Download the backup file
 	reader, err := c.downloadBackup(ctx, latest.Path, derefInt64(latest.Size))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to download backup: %w", err)
 	}
 
-	// Read the entire backup into memory for processing
+	// Read the entire backup into memory
 	backupData, err := io.ReadAll(reader)
 	reader.Close()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read backup data: %w", err)
 	}
 
-	// Check if this instance uses PostgreSQL
-	dbType, err := c.getDatabaseType(ctx)
-	if err != nil {
-		log.Printf("[radarr] Warning: could not determine database type: %v", err)
-	}
-
-	var finalBackupData []byte
-	if dbType == "postgreSQL" {
-		log.Printf("[radarr] PostgreSQL detected, extracting connection info and dumping databases...")
-
-		// Parse Postgres config from the backup's config.xml
-		pgConfig, err := backup.ParsePostgresConfigFromZip(backupData)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to parse postgres config: %w", err)
-		}
-
-		// Apply overrides from config if specified
-		if pgConfig != nil && c.pgOverride != nil {
-			log.Printf("[radarr] Applying postgres config overrides from config.yml")
-			if c.pgOverride.Host != "" {
-				pgConfig.Host = c.pgOverride.Host
-			}
-			if c.pgOverride.Port != "" {
-				pgConfig.Port = c.pgOverride.Port
-			}
-			if c.pgOverride.User != "" {
-				pgConfig.User = c.pgOverride.User
-			}
-			if c.pgOverride.Password != "" {
-				pgConfig.Password = c.pgOverride.Password
-			}
-			if c.pgOverride.MainDB != "" {
-				pgConfig.MainDB = c.pgOverride.MainDB
-			}
-			if c.pgOverride.LogDB != "" {
-				pgConfig.LogDB = c.pgOverride.LogDB
-			}
-		} else if pgConfig == nil && c.pgOverride != nil {
-			// Use override as the full config if no config.xml found
-			pgConfig = c.pgOverride
-		}
-
-		if pgConfig != nil {
-			log.Printf("[radarr] Using postgres host: %s:%s", pgConfig.Host, pgConfig.Port)
-
-			// Dump all Postgres databases
-			dumps, err := pgConfig.DumpAllDatabases()
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to dump postgres databases: %w", err)
-			}
-
-			log.Printf("[radarr] Dumped %d databases, creating enhanced backup...", len(dumps))
-
-			// Create enhanced backup with pg_dump files
-			finalBackupData, err = backup.CreateEnhancedBackup(backupData, dumps)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to create enhanced backup: %w", err)
-			}
-		} else {
-			finalBackupData = backupData
-		}
-	} else {
-		finalBackupData = backupData
-	}
-
 	result := &backup.BackupResult{
 		Name:      derefString(latest.Name),
 		Path:      derefString(latest.Path),
-		Size:      int64(len(finalBackupData)),
+		Size:      int64(len(backupData)),
 		CreatedAt: derefTime(latest.Time),
 	}
 
-	return result, io.NopCloser(bytes.NewReader(finalBackupData)), nil
+	return result, io.NopCloser(bytes.NewReader(backupData)), nil
 }
 
 // Restore restores the application from a backup file
-func (c *RadarrClient) Restore(ctx context.Context, backupData io.Reader) error {
+func (c *ProwlarrClient) Restore(ctx context.Context, backupData io.Reader) error {
 	log.Printf("[%s] Reading backup data...", c.Name())
 
-	// Read all backup data into memory so we can analyze it
+	// Read all backup data into memory
 	zipData, err := io.ReadAll(backupData)
 	if err != nil {
 		return fmt.Errorf("failed to read backup data: %w", err)
 	}
 
-	// Check if backup contains PostgreSQL dumps
-	pgDumps, err := backup.ExtractPostgresDumpsFromZip(zipData)
-	if err != nil {
-		return fmt.Errorf("failed to extract postgres dumps: %w", err)
-	}
-
-	if len(pgDumps) > 0 {
-		log.Printf("[%s] PostgreSQL backup detected with %d database dumps", c.Name(), len(pgDumps))
-
-		// Parse postgres config from the backup's config.xml
-		pgConfig, err := backup.ParsePostgresConfigFromZip(zipData)
-		if err != nil {
-			return fmt.Errorf("failed to parse postgres config from backup: %w", err)
-		}
-
-		if pgConfig == nil {
-			return fmt.Errorf("backup contains postgres dumps but config.xml has no postgres settings")
-		}
-
-		// Apply postgres config overrides if specified
-		if c.pgOverride != nil {
-			if c.pgOverride.Host != "" {
-				pgConfig.Host = c.pgOverride.Host
-			}
-			if c.pgOverride.Port != "" {
-				pgConfig.Port = c.pgOverride.Port
-			}
-			if c.pgOverride.User != "" {
-				pgConfig.User = c.pgOverride.User
-			}
-			if c.pgOverride.Password != "" {
-				pgConfig.Password = c.pgOverride.Password
-			}
-			log.Printf("[%s] Applying postgres config overrides, using host: %s:%s", c.Name(), pgConfig.Host, pgConfig.Port)
-		}
-
-		// Restore PostgreSQL databases
-		log.Printf("[%s] Restoring PostgreSQL databases...", c.Name())
-		for filename, data := range pgDumps {
-			log.Printf("[%s] Restoring %s (%d bytes)...", c.Name(), filename, len(data))
-		}
-
-		if err := pgConfig.RestoreAllDatabases(pgDumps); err != nil {
-			return fmt.Errorf("failed to restore postgres databases: %w", err)
-		}
-		log.Printf("[%s] PostgreSQL databases restored successfully", c.Name())
-	} else {
-		log.Printf("[%s] No PostgreSQL dumps found in backup (SQLite-only backup)", c.Name())
-	}
-
-	// Now upload the backup to the API (handles config.xml)
+	// Upload the backup to the API
 	log.Printf("[%s] Uploading backup for restore...", c.Name())
 
 	// Create multipart form data
@@ -264,8 +147,8 @@ func (c *RadarrClient) Restore(ctx context.Context, backupData io.Reader) error 
 		return fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	// Build request URL
-	reqURL := fmt.Sprintf("%s/api/v3/system/backup/restore/upload", strings.TrimSuffix(c.baseURL, "/"))
+	// Build request URL — Prowlarr uses /api/v1/
+	reqURL := fmt.Sprintf("%s/api/v1/system/backup/restore/upload", strings.TrimSuffix(c.baseURL, "/"))
 
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, &buf)
@@ -320,13 +203,13 @@ func (c *RadarrClient) Restore(ctx context.Context, backupData io.Reader) error 
 
 // Internal methods
 
-func (c *RadarrClient) runBackupCommand(ctx context.Context) error {
+func (c *ProwlarrClient) runBackupCommand(ctx context.Context) error {
 	cmdName := "Backup"
 	cmdBody := CommandResource{
 		Name: &cmdName,
 	}
 
-	resp, err := c.client.PostApiV3Command(ctx, cmdBody)
+	resp, err := c.client.PostApiV1Command(ctx, cmdBody)
 	if err != nil {
 		return fmt.Errorf("failed to send command: %w", err)
 	}
@@ -350,9 +233,9 @@ func (c *RadarrClient) runBackupCommand(ctx context.Context) error {
 	return c.waitForCommand(ctx, *cmdResp.Id)
 }
 
-func (c *RadarrClient) waitForCommand(ctx context.Context, commandID int32) error {
+func (c *ProwlarrClient) waitForCommand(ctx context.Context, commandID int32) error {
 	for {
-		resp, err := c.client.GetApiV3CommandId(ctx, commandID)
+		resp, err := c.client.GetApiV1CommandId(ctx, commandID)
 		if err != nil {
 			return fmt.Errorf("failed to get command status: %w", err)
 		}
@@ -365,20 +248,20 @@ func (c *RadarrClient) waitForCommand(ctx context.Context, commandID int32) erro
 		resp.Body.Close()
 
 		if cmdResp.Status != nil {
-			log.Printf("[radarr] Command status: %s", *cmdResp.Status)
+			log.Printf("[prowlarr] Command status: %s", *cmdResp.Status)
 
 			switch *cmdResp.Status {
-			case CommandStatusCompleted:
+			case Completed:
 				return nil
-			case CommandStatusFailed:
+			case Failed:
 				msg := ""
 				if cmdResp.Message != nil {
 					msg = *cmdResp.Message
 				}
 				return fmt.Errorf("command failed: %s", msg)
-			case CommandStatusCancelled:
+			case Cancelled:
 				return fmt.Errorf("command was cancelled")
-			case CommandStatusAborted:
+			case Aborted:
 				return fmt.Errorf("command was aborted")
 			}
 		}
@@ -392,8 +275,8 @@ func (c *RadarrClient) waitForCommand(ctx context.Context, commandID int32) erro
 	}
 }
 
-func (c *RadarrClient) getBackupFiles(ctx context.Context) ([]BackupResource, error) {
-	resp, err := c.client.GetApiV3SystemBackup(ctx)
+func (c *ProwlarrClient) getBackupFiles(ctx context.Context) ([]BackupResource, error) {
+	resp, err := c.client.GetApiV1SystemBackup(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get backups: %w", err)
 	}
@@ -412,31 +295,7 @@ func (c *RadarrClient) getBackupFiles(ctx context.Context) ([]BackupResource, er
 	return backups, nil
 }
 
-func (c *RadarrClient) getDatabaseType(ctx context.Context) (string, error) {
-	resp, err := c.client.GetApiV3SystemStatus(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get system status: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API error: %d - %s", resp.StatusCode, string(body))
-	}
-
-	var status SystemResource
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return "", fmt.Errorf("failed to decode system status: %w", err)
-	}
-
-	if status.DatabaseType == nil {
-		return "sqLite", nil // Default to SQLite
-	}
-
-	return string(*status.DatabaseType), nil
-}
-
-func (c *RadarrClient) downloadBackup(ctx context.Context, backupPath *string, expectedSize int64) (io.ReadCloser, error) {
+func (c *ProwlarrClient) downloadBackup(ctx context.Context, backupPath *string, expectedSize int64) (io.ReadCloser, error) {
 	if backupPath == nil || *backupPath == "" {
 		return nil, fmt.Errorf("backup path is empty")
 	}
@@ -447,7 +306,7 @@ func (c *RadarrClient) downloadBackup(ctx context.Context, backupPath *string, e
 		return nil, fmt.Errorf("failed to get auth method: %w", err)
 	}
 
-	log.Printf("[radarr] Authentication method: %s", authMethod)
+	log.Printf("[prowlarr] Authentication method: %s", authMethod)
 
 	// Handle authentication based on method
 	switch strings.ToLower(authMethod) {
@@ -460,12 +319,12 @@ func (c *RadarrClient) downloadBackup(ctx context.Context, backupPath *string, e
 	case "none", "external":
 		// No authentication needed or handled externally
 	default:
-		log.Printf("[radarr] Unknown auth method: %s, proceeding without session auth", authMethod)
+		log.Printf("[prowlarr] Unknown auth method: %s, proceeding without session auth", authMethod)
 	}
 
 	// Download the backup using the session
 	downloadURL := fmt.Sprintf("%s%s", c.baseURL, *backupPath)
-	log.Printf("[radarr] Downloading backup from: %s", downloadURL)
+	log.Printf("[prowlarr] Downloading backup from: %s", downloadURL)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
@@ -515,14 +374,14 @@ func (c *RadarrClient) downloadBackup(ctx context.Context, backupPath *string, e
 
 	// Verify content length matches expected size
 	if resp.ContentLength > 0 && expectedSize > 0 && resp.ContentLength != expectedSize {
-		log.Printf("[radarr] Content length mismatch: got %d, expected %d (continuing anyway)", resp.ContentLength, expectedSize)
+		log.Printf("[prowlarr] Content length mismatch: got %d, expected %d (continuing anyway)", resp.ContentLength, expectedSize)
 	}
 
 	return resp.Body, nil
 }
 
-func (c *RadarrClient) getAuthMethod(ctx context.Context) (string, error) {
-	resp, err := c.client.GetApiV3ConfigHost(ctx)
+func (c *ProwlarrClient) getAuthMethod(ctx context.Context) (string, error) {
+	resp, err := c.client.GetApiV1ConfigHost(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get host config: %w", err)
 	}
@@ -545,7 +404,7 @@ func (c *RadarrClient) getAuthMethod(ctx context.Context) (string, error) {
 	return string(*config.AuthenticationMethod), nil
 }
 
-func (c *RadarrClient) loginWithForms(ctx context.Context) error {
+func (c *ProwlarrClient) loginWithForms(ctx context.Context) error {
 	loginURL := fmt.Sprintf("%s/login", c.baseURL)
 
 	formData := url.Values{}
@@ -603,12 +462,12 @@ func (c *RadarrClient) loginWithForms(ctx context.Context) error {
 		return fmt.Errorf("login failed: no auth cookie received (check username/password)")
 	}
 
-	log.Printf("[radarr] Forms login successful")
+	log.Printf("[prowlarr] Forms login successful")
 	return nil
 }
 
-func (c *RadarrClient) restart(ctx context.Context) error {
-	resp, err := c.client.PostApiV3SystemRestart(ctx)
+func (c *ProwlarrClient) restart(ctx context.Context) error {
+	resp, err := c.client.PostApiV1SystemRestart(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to send restart command: %w", err)
 	}

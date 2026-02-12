@@ -38,6 +38,7 @@ type S3Backend struct {
 	bucket       string
 	prefix       string
 	storageClass s3types.StorageClass
+	name         string
 }
 
 // New creates a new S3 storage backend from the given config.
@@ -100,9 +101,16 @@ func New(ctx context.Context, cfg Config) (*S3Backend, error) {
 	}, nil
 }
 
+func (b *S3Backend) Type() string { return "s3" }
+
 func (b *S3Backend) Name() string {
-	return "s3"
+	if b.name != "" {
+		return b.name
+	}
+	return b.Type()
 }
+
+func (b *S3Backend) SetName(name string) { b.name = name }
 
 // objectKey returns the full S3 object key for a backup file.
 // Layout: <prefix>/<appName>/<fileName>

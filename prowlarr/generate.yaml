@@ -1,0 +1,12 @@
+# oapi-codegen configuration for Prowlarr API client generation
+package: prowlarr
+generate:
+  client: true
+  models: true
+output: client.gen.go
+output-options:
+  skip-prune: true
+  exclude-tags:
+    - StaticResource
+    - Authentication
+    - ApiInfo
