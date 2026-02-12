@@ -3,13 +3,15 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"backuparr/internal/config"
 )
 
 func TestFindAppConfig(t *testing.T) {
-	config := BackuparrConfig{
-		AppConfigs: []AppConfig{
-			{AppType: "sonarr", Connection: Connection{APIKey: "key1"}},
-			{AppType: "radarr", Connection: Connection{APIKey: "key2"}},
+	cfg := config.BackuparrConfig{
+		AppConfigs: []config.AppConfig{
+			{AppType: "sonarr", Connection: config.Connection{APIKey: "key1"}},
+			{AppType: "radarr", Connection: config.Connection{APIKey: "key2"}},
 		},
 	}
 
@@ -26,7 +28,7 @@ func TestFindAppConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := findAppConfig(config, tt.app)
+			ac, err := findAppConfig(cfg, tt.app)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -36,16 +38,16 @@ func TestFindAppConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if cfg.Connection.APIKey != tt.wantKey {
-				t.Errorf("got apiKey %q, want %q", cfg.Connection.APIKey, tt.wantKey)
+			if ac.Connection.APIKey != tt.wantKey {
+				t.Errorf("got apiKey %q, want %q", ac.Connection.APIKey, tt.wantKey)
 			}
 		})
 	}
 }
 
 func TestFindAppConfig_Empty(t *testing.T) {
-	config := BackuparrConfig{}
-	_, err := findAppConfig(config, "sonarr")
+	cfg := config.BackuparrConfig{}
+	_, err := findAppConfig(cfg, "sonarr")
 	if err == nil {
 		t.Fatal("expected error for empty config")
 	}
@@ -79,30 +81,30 @@ func TestFormatSize(t *testing.T) {
 
 func TestPreflightCheck_NoTools(t *testing.T) {
 	// Config with no postgres — should always pass
-	config := BackuparrConfig{
-		AppConfigs: []AppConfig{
+	cfg := config.BackuparrConfig{
+		AppConfigs: []config.AppConfig{
 			{
 				AppType: "sonarr",
-				Storage: []StorageConfig{{Type: "local", Path: "./backups"}},
+				Storage: []config.StorageConfig{{Type: "local", Path: "./backups"}},
 			},
 		},
 	}
-	if err := preflightCheck(config); err != nil {
+	if err := preflightCheck(cfg); err != nil {
 		t.Fatalf("expected no error for local-only config, got: %v", err)
 	}
 }
 
 func TestPreflightCheck_PostgresTools(t *testing.T) {
-	config := BackuparrConfig{
-		AppConfigs: []AppConfig{
+	cfg := config.BackuparrConfig{
+		AppConfigs: []config.AppConfig{
 			{
 				AppType:  "sonarr",
-				Postgres: &PostgresOverride{Host: "db.local"},
-				Storage:  []StorageConfig{{Type: "local"}},
+				Postgres: &config.PostgresOverride{Host: "db.local"},
+				Storage:  []config.StorageConfig{{Type: "local"}},
 			},
 		},
 	}
-	err := preflightCheck(config)
+	err := preflightCheck(cfg)
 	// On CI/dev machines pg_dump and psql may or may not be installed.
 	// We just verify the function runs without panic and returns the right
 	// kind of error if tools are missing.
@@ -114,16 +116,16 @@ func TestPreflightCheck_PostgresTools(t *testing.T) {
 }
 
 func TestPreflightCheck_AllMissing(t *testing.T) {
-	config := BackuparrConfig{
-		AppConfigs: []AppConfig{
+	cfg := config.BackuparrConfig{
+		AppConfigs: []config.AppConfig{
 			{
 				AppType:  "sonarr",
-				Postgres: &PostgresOverride{Host: "db.local"},
-				Storage:  []StorageConfig{{Type: "local", Path: "./backups"}},
+				Postgres: &config.PostgresOverride{Host: "db.local"},
+				Storage:  []config.StorageConfig{{Type: "local", Path: "./backups"}},
 			},
 		},
 	}
-	err := preflightCheck(config)
+	err := preflightCheck(cfg)
 	if err != nil {
 		// Should mention postgres tools if missing
 		msg := err.Error()
@@ -135,26 +137,26 @@ func TestPreflightCheck_AllMissing(t *testing.T) {
 
 func TestStorageConfigName(t *testing.T) {
 	tests := []struct {
-		cfg  StorageConfig
+		cfg  config.StorageConfig
 		want string
 	}{
-		{StorageConfig{Type: "local"}, "local"},
-		{StorageConfig{Name: "nas", Type: "local"}, "nas"},
-		{StorageConfig{Name: "offsite", Type: "s3"}, "offsite"},
-		{StorageConfig{Type: "s3"}, "s3"},
+		{config.StorageConfig{Type: "local"}, "local"},
+		{config.StorageConfig{Name: "nas", Type: "local"}, "nas"},
+		{config.StorageConfig{Name: "offsite", Type: "s3"}, "offsite"},
+		{config.StorageConfig{Type: "s3"}, "s3"},
 	}
 	for _, tt := range tests {
-		got := storageConfigName(tt.cfg)
+		got := config.StorageConfigName(tt.cfg)
 		if got != tt.want {
-			t.Errorf("storageConfigName(%+v) = %q, want %q", tt.cfg, got, tt.want)
+			t.Errorf("config.StorageConfigName(%+v) = %q, want %q", tt.cfg, got, tt.want)
 		}
 	}
 }
 
 func TestFindBackend(t *testing.T) {
-	appCfg := AppConfig{
+	appCfg := config.AppConfig{
 		AppType: "sonarr",
-		Storage: []StorageConfig{
+		Storage: []config.StorageConfig{
 			{Type: "local", Path: "./backups"},
 			{Name: "nas", Type: "local", Path: "/mnt/nas"},
 		},
@@ -191,9 +193,9 @@ func TestFindBackend(t *testing.T) {
 }
 
 func TestFindBackend_Ambiguous(t *testing.T) {
-	appCfg := AppConfig{
+	appCfg := config.AppConfig{
 		AppType: "sonarr",
-		Storage: []StorageConfig{
+		Storage: []config.StorageConfig{
 			{Type: "local", Path: "./backups1"},
 			{Type: "local", Path: "./backups2"},
 		},

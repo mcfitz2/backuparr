@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"backuparr/backup"
+	"backuparr/internal/backup"
 )
 
 // Ensure SonarrClient implements backup.Client

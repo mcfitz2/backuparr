@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"backuparr/sidecar"
+	"backuparr/internal/sidecar"
 )
 
 // sidecarTestInstance describes a sidecar integration test target.

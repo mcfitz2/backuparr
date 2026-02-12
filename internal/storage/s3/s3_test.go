@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"backuparr/storage"
+	"backuparr/internal/storage"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"

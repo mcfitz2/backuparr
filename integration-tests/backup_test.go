@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"backuparr/backup"
-	"backuparr/prowlarr"
-	"backuparr/radarr"
-	"backuparr/sonarr"
+	"backuparr/internal/backup"
+	"backuparr/internal/prowlarr"
+	"backuparr/internal/radarr"
+	"backuparr/internal/sonarr"
 )
 
 // Test configuration for each instance

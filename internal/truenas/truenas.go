@@ -41,7 +41,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"backuparr/backup"
+	"backuparr/internal/backup"
 )
 
 // Verify Client satisfies the backup.Client interface at compile time.

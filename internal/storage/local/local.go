@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"backuparr/storage"
+	"backuparr/internal/storage"
 )
 
 // Ensure LocalBackend implements storage.Backend at compile time.
