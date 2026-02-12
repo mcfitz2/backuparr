@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"time"
 
-	"backuparr/backup"
+	"backuparr/internal/backup"
 )
 
 // Client implements backup.Client by talking to a sidecar HTTP server.

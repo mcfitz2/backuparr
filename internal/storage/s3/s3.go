@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
-	"backuparr/storage"
+	"backuparr/internal/storage"
 )
 
 // Ensure S3Backend implements storage.Backend at compile time.

@@ -8,21 +8,21 @@ generate: generate-sonarr generate-radarr generate-prowlarr
 # Generate Sonarr API client
 generate-sonarr:
 	@echo "Generating Sonarr API client..."
-	cd sonarr && go generate
+	cd internal/sonarr && go generate
 
 # Generate Radarr API client
 generate-radarr:
 	@echo "Generating Radarr API client..."
-	cd radarr && go generate
+	cd internal/radarr && go generate
 
 # Generate Prowlarr API client
 generate-prowlarr:
 	@echo "Generating Prowlarr API client..."
-	cd prowlarr && go generate
+	cd internal/prowlarr && go generate
 
 # Build the application
 build:
-	go build -o backuparr .
+	go build -o backuparr ./cmd/backuparr
 
 # Build the sidecar Docker image
 build-sidecar:
@@ -97,7 +97,7 @@ test-quick: test-containers-down test-containers-up test-containers-setup
 # Run unit tests (no containers needed)
 test-unit:
 	@echo "Running unit tests..."
-	set -o pipefail; go test -json -v ./storage/... 2>&1 | $(GOBIN)/gotestfmt
+	set -o pipefail; go test -json -v ./internal/... ./cmd/... 2>&1 | $(GOBIN)/gotestfmt
 
 # Start MinIO container for S3 tests
 test-s3-up:

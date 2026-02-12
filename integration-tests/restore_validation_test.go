@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"backuparr/prowlarr"
-	"backuparr/radarr"
-	"backuparr/sonarr"
+	"backuparr/internal/prowlarr"
+	"backuparr/internal/radarr"
+	"backuparr/internal/sonarr"
 )
 
 // TestRestoreValidationSonarr tests that restoring a backup properly restores the original state

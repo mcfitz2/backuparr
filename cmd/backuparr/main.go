@@ -13,114 +13,25 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
-	"backuparr/backup"
-	"backuparr/prowlarr"
-	"backuparr/radarr"
-	"backuparr/sidecar"
-	"backuparr/sonarr"
-	"backuparr/storage"
-	"backuparr/storage/local"
-	s3backend "backuparr/storage/s3"
-	"backuparr/truenas"
+	"backuparr/internal/backup"
+	"backuparr/internal/config"
+	"backuparr/internal/prowlarr"
+	"backuparr/internal/radarr"
+	"backuparr/internal/sidecar"
+	"backuparr/internal/sonarr"
+	"backuparr/internal/storage"
+	"backuparr/internal/storage/local"
+	s3backend "backuparr/internal/storage/s3"
+	"backuparr/internal/truenas"
 )
-
-// BackuparrConfig is the top-level configuration.
-type BackuparrConfig struct {
-	AppConfigs []AppConfig `yaml:"appConfigs"`
-}
-
-// AppConfig configures a single application to back up.
-type AppConfig struct {
-	AppType    string            `yaml:"appType"`
-	Name       string            `yaml:"name,omitempty"` // optional display name; defaults to appType
-	Connection Connection        `yaml:"connection"`
-	Retention  RetentionPolicy   `yaml:"retention"`
-	Postgres   *PostgresOverride `yaml:"postgres,omitempty"`
-	Storage    []StorageConfig   `yaml:"storage,omitempty"`
-}
-
-type RetentionPolicy struct {
-	KeepLast    int `yaml:"keepLast"`
-	KeepHourly  int `yaml:"keepHourly"`
-	KeepDaily   int `yaml:"keepDaily"`
-	KeepWeekly  int `yaml:"keepWeekly"`
-	KeepMonthly int `yaml:"keepMonthly"`
-	KeepYearly  int `yaml:"keepYearly"`
-}
-
-type Connection struct {
-	APIKey   string `yaml:"apiKey"`
-	URL      string `yaml:"url"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-}
-
-// PostgresOverride allows manually specifying Postgres connection details.
-// When specified, these override the auto-detected values from config.xml.
-type PostgresOverride struct {
-	Host     string `yaml:"host"`
-	Port     string `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	MainDB   string `yaml:"mainDb"`
-	LogDB    string `yaml:"logDb"`
-}
-
-// StorageConfig defines a storage backend destination.
-type StorageConfig struct {
-	Name string `yaml:"name,omitempty"` // optional display name; defaults to type
-	Type string `yaml:"type"`           // "local", "s3"
-
-	// Local backend
-	Path string `yaml:"path,omitempty"`
-
-	// S3 backend
-	Bucket          string `yaml:"bucket,omitempty"`
-	Prefix          string `yaml:"prefix,omitempty"`
-	Region          string `yaml:"region,omitempty"`
-	Endpoint        string `yaml:"endpoint,omitempty"`
-	AccessKeyID     string `yaml:"accessKeyId,omitempty"`
-	SecretAccessKey string `yaml:"secretAccessKey,omitempty"`
-	StorageClass    string `yaml:"storageClass,omitempty"`
-}
-
-func parseConfig(path string) (BackuparrConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return BackuparrConfig{}, fmt.Errorf("error reading config file: %w", err)
-	}
-	var config BackuparrConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return BackuparrConfig{}, fmt.Errorf("error parsing config: %w", err)
-	}
-	return config, nil
-}
-
-// configPath resolves the config file path from (in order of priority):
-// 1. BACKUPARR_CONFIG environment variable
-// 2. /config/config.yml (Docker default)
-// 3. ./config.yml (local development fallback)
-func configPath() string {
-	if v := os.Getenv("BACKUPARR_CONFIG"); v != "" {
-		return v
-	}
-	// Docker default location
-	if _, err := os.Stat("/config/config.yml"); err == nil {
-		return "/config/config.yml"
-	}
-	// Local development fallback
-	return "config.yml"
-}
 
 // preflightCheck inspects the loaded config and verifies that all required
 // external tools are available before any work begins. This avoids partial
 // failures mid-backup or mid-restore due to a missing CLI tool.
-func preflightCheck(config BackuparrConfig) error {
+func preflightCheck(cfg config.BackuparrConfig) error {
 	var needPgDump, needPsql bool
 
-	for _, app := range config.AppConfigs {
+	for _, app := range cfg.AppConfigs {
 		// If any app has an explicit postgres override, we'll need pg tools
 		if app.Postgres != nil {
 			needPgDump = true
@@ -148,7 +59,7 @@ func preflightCheck(config BackuparrConfig) error {
 	return nil
 }
 
-func createClient(cfg AppConfig) (backup.Client, error) {
+func createClient(cfg config.AppConfig) (backup.Client, error) {
 	var pgOverride *backup.PostgresConfig
 	if cfg.Postgres != nil {
 		pgOverride = &backup.PostgresConfig{
@@ -181,7 +92,7 @@ func createClient(cfg AppConfig) (backup.Client, error) {
 	}
 }
 
-func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
+func createBackends(configs []config.StorageConfig) ([]storage.Backend, error) {
 	if len(configs) == 0 {
 		// Default to local storage in ./backups for backward compatibility
 		return []storage.Backend{local.New("./backups")}, nil
@@ -219,13 +130,13 @@ func createBackends(configs []StorageConfig) ([]storage.Backend, error) {
 		default:
 			return nil, fmt.Errorf("unsupported storage type: %s", cfg.Type)
 		}
-		b.SetName(storageConfigName(cfg))
+		b.SetName(config.StorageConfigName(cfg))
 		backends = append(backends, b)
 	}
 	return backends, nil
 }
 
-func toStorageRetention(r RetentionPolicy) storage.RetentionPolicy {
+func toStorageRetention(r config.RetentionPolicy) storage.RetentionPolicy {
 	return storage.RetentionPolicy{
 		KeepLast:    r.KeepLast,
 		KeepHourly:  r.KeepHourly,
@@ -236,7 +147,7 @@ func toStorageRetention(r RetentionPolicy) storage.RetentionPolicy {
 	}
 }
 
-func runBackup(ctx context.Context, app backup.Client, backends []storage.Backend, retention RetentionPolicy) error {
+func runBackup(ctx context.Context, app backup.Client, backends []storage.Backend, retention config.RetentionPolicy) error {
 	log.Printf("[%s] Starting backup...", app.Name())
 
 	result, reader, err := app.Backup(ctx)
@@ -337,16 +248,16 @@ Docker:
 func runBackupAll() {
 	ctx := context.Background()
 
-	config, err := parseConfig(configPath())
+	cfg, err := config.Parse(config.Path())
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if err := preflightCheck(config); err != nil {
+	if err := preflightCheck(cfg); err != nil {
 		log.Fatalf("Preflight check failed: %v", err)
 	}
 
-	for _, appCfg := range config.AppConfigs {
+	for _, appCfg := range cfg.AppConfigs {
 		client, err := createClient(appCfg)
 		if err != nil {
 			log.Printf("Failed to create client for %s: %v", appCfg.AppType, err)
@@ -386,17 +297,17 @@ func runRestoreCLI() {
 
 	ctx := context.Background()
 
-	config, err := parseConfig(configPath())
+	cfg, err := config.Parse(config.Path())
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if err := preflightCheck(config); err != nil {
+	if err := preflightCheck(cfg); err != nil {
 		log.Fatalf("Preflight check failed: %v", err)
 	}
 
 	// Find the app config
-	appCfg, err := findAppConfig(config, *appName)
+	appCfg, err := findAppConfig(cfg, *appName)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -460,13 +371,13 @@ func runListCLI() {
 
 	ctx := context.Background()
 
-	config, err := parseConfig(configPath())
+	cfg, err := config.Parse(config.Path())
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
 	// Find the app config
-	appCfg, err := findAppConfig(config, *appName)
+	appCfg, err := findAppConfig(cfg, *appName)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -500,43 +411,34 @@ func runListCLI() {
 
 // findAppConfig looks up the AppConfig for the given app name.
 // It matches against the Name field first, then falls back to AppType.
-func findAppConfig(config BackuparrConfig, appName string) (AppConfig, error) {
-	for _, cfg := range config.AppConfigs {
-		effectiveName := cfg.Name
+func findAppConfig(cfg config.BackuparrConfig, appName string) (config.AppConfig, error) {
+	for _, ac := range cfg.AppConfigs {
+		effectiveName := ac.Name
 		if effectiveName == "" {
-			effectiveName = cfg.AppType
+			effectiveName = ac.AppType
 		}
 		if effectiveName == appName {
-			return cfg, nil
+			return ac, nil
 		}
 	}
 	var names []string
-	for _, cfg := range config.AppConfigs {
-		if cfg.Name != "" {
-			names = append(names, cfg.Name)
+	for _, ac := range cfg.AppConfigs {
+		if ac.Name != "" {
+			names = append(names, ac.Name)
 		} else {
-			names = append(names, cfg.AppType)
+			names = append(names, ac.AppType)
 		}
 	}
-	return AppConfig{}, fmt.Errorf("app %q not found in config (available: %v)", appName, names)
-}
-
-// storageConfigName returns the effective name for a storage config entry.
-// If a custom name is set it takes precedence; otherwise the type is used.
-func storageConfigName(sc StorageConfig) string {
-	if sc.Name != "" {
-		return sc.Name
-	}
-	return sc.Type
+	return config.AppConfig{}, fmt.Errorf("app %q not found in config (available: %v)", appName, names)
 }
 
 // findBackend creates a single storage backend matching the given name from
 // the app's config. Returns an error if no match is found or if multiple
 // backends share the same effective name (ambiguous).
-func findBackend(appCfg AppConfig, backendName string) (storage.Backend, error) {
-	var matches []StorageConfig
+func findBackend(appCfg config.AppConfig, backendName string) (storage.Backend, error) {
+	var matches []config.StorageConfig
 	for _, sc := range appCfg.Storage {
-		if storageConfigName(sc) == backendName {
+		if config.StorageConfigName(sc) == backendName {
 			matches = append(matches, sc)
 		}
 	}
@@ -545,7 +447,7 @@ func findBackend(appCfg AppConfig, backendName string) (storage.Backend, error) 
 	case 0:
 		var names []string
 		for _, sc := range appCfg.Storage {
-			names = append(names, storageConfigName(sc))
+			names = append(names, config.StorageConfigName(sc))
 		}
 		return nil, fmt.Errorf("backend %q not configured for %s (available: %v)", backendName, appCfg.AppType, names)
 	case 1:

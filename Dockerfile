@@ -5,7 +5,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /backuparr .
+RUN CGO_ENABLED=0 go build -o /backuparr ./cmd/backuparr
 
 # ---- Runtime stage ----
 # Trixie ships postgresql-client-17 which handles PG16+ servers natively.
