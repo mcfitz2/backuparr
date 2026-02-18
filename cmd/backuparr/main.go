@@ -203,6 +203,8 @@ func main() {
 		runRestoreCLI()
 	case "list":
 		runListCLI()
+	case "web", "serve":
+		runWebUI()
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -217,6 +219,7 @@ Commands:
   backup                  Run backups for all configured apps (default)
   restore                 Restore an app from a storage backend
   list                    List available backups from a storage backend
+	web                     Start web UI for listing/deleting backups
   help                    Show this help message
 
 Restore flags:
@@ -239,6 +242,7 @@ Examples:
   backuparr restore --app sonarr --backend s3 --latest
   backuparr restore --app radarr --backend nas --latest  # Named backend
   backuparr restore --app sonarr --backend local --backup "sonarr/sonarr_2026-02-06T120000Z.zip"
+	backuparr web --listen :8080 --config ./config.yml # Start web UI
 
 Docker:
   docker run -v /path/to/config.yml:/config/config.yml backuparr backup

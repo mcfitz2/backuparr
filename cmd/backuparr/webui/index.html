@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Backuparr</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Backuparr</h1>
+      <p class="muted">View, delete, and run backups with live status.</p>
+
+      <section class="controls">
+        <label>
+          App
+          <select id="appSelect"></select>
+        </label>
+        <label>
+          Backend
+          <select id="backendSelect"></select>
+        </label>
+        <button id="refreshBtn">Refresh</button>
+        <button id="backupSelectedBtn">Run selected backup</button>
+        <button id="backupAllBtn">Run all backups</button>
+      </section>
+
+      <section id="backupLogsSection" class="hidden">
+        <h2>Live backup logs</h2>
+        <pre id="backupLogs" class="logs" aria-live="polite"></pre>
+      </section>
+
+      <section>
+        <table id="backupsTable">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Size</th>
+              <th>Created</th>
+              <th>Key</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <p id="status" class="muted"></p>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
