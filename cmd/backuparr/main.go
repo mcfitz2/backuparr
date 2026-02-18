@@ -242,7 +242,7 @@ Examples:
   backuparr restore --app sonarr --backend s3 --latest
   backuparr restore --app radarr --backend nas --latest  # Named backend
   backuparr restore --app sonarr --backend local --backup "sonarr/sonarr_2026-02-06T120000Z.zip"
-	backuparr web --listen :8080                      # Start web UI
+	backuparr web --listen :8080 --config ./config.yml # Start web UI
 
 Docker:
   docker run -v /path/to/config.yml:/config/config.yml backuparr backup

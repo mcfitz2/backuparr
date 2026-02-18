@@ -34,9 +34,15 @@ type appsResponse struct {
 func runWebUI() {
 	fs := flag.NewFlagSet("web", flag.ExitOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address")
+	configPath := fs.String("config", "", "Path to config file (overrides BACKUPARR_CONFIG)")
 	fs.Parse(os.Args[2:])
 
-	cfg, err := config.Parse(config.Path())
+	path := config.Path()
+	if *configPath != "" {
+		path = *configPath
+	}
+
+	cfg, err := config.Parse(path)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
@@ -52,7 +58,7 @@ func runWebUI() {
 	}
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
-	log.Printf("Backuparr web UI listening on %s", *listen)
+	log.Printf("Backuparr web UI listening on %s (config: %s)", *listen, path)
 	if err := http.ListenAndServe(*listen, mux); err != nil {
 		log.Fatalf("Web server failed: %v", err)
 	}
