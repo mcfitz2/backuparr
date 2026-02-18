@@ -4,7 +4,9 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"flag"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -31,6 +33,23 @@ type appsResponse struct {
 	Apps []appOption `json:"apps"`
 }
 
+type triggerBackupRequest struct {
+	App string `json:"app,omitempty"`
+	All bool   `json:"all,omitempty"`
+}
+
+type triggerBackupResult struct {
+	App    string `json:"app"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	Status string `json:"status"`
+}
+
+type triggerBackupResponse struct {
+	Success bool                  `json:"success"`
+	Results []triggerBackupResult `json:"results"`
+}
+
 func runWebUI() {
 	fs := flag.NewFlagSet("web", flag.ExitOnError)
 	listen := fs.String("listen", ":8080", "HTTP listen address")
@@ -51,6 +70,7 @@ func runWebUI() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/apps", s.handleApps)
 	mux.HandleFunc("/api/backups", s.handleBackups)
+	mux.HandleFunc("/api/backup", s.handleTriggerBackup)
 
 	staticFS, err := fsSub(webUIFS, "webui")
 	if err != nil {
@@ -107,6 +127,109 @@ func (s *webServer) handleApps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, appsResponse{Apps: apps})
 }
 
+func (s *webServer) handleTriggerBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req triggerBackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	targetApp := ""
+	if !req.All {
+		targetApp = req.App
+		if targetApp == "" {
+			writeError(w, http.StatusBadRequest, "set all=true or provide app")
+			return
+		}
+	}
+
+	if err := preflightCheck(s.cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	ctx := context.Background()
+	results := make([]triggerBackupResult, 0, len(s.cfg.AppConfigs))
+	foundTarget := targetApp == ""
+
+	for _, appCfg := range s.cfg.AppConfigs {
+		name := appCfg.Name
+		if name == "" {
+			name = appCfg.AppType
+		}
+
+		if targetApp != "" && name != targetApp {
+			continue
+		}
+		foundTarget = true
+
+		client, err := createClient(appCfg)
+		if err != nil {
+			results = append(results, triggerBackupResult{
+				App:    name,
+				OK:     false,
+				Status: "failed",
+				Error:  "failed to create app client",
+			})
+			continue
+		}
+
+		backends, err := createBackends(appCfg.Storage)
+		if err != nil {
+			results = append(results, triggerBackupResult{
+				App:    name,
+				OK:     false,
+				Status: "failed",
+				Error:  "failed to create storage backends",
+			})
+			continue
+		}
+
+		if err := runBackup(ctx, client, backends, appCfg.Retention); err != nil {
+			results = append(results, triggerBackupResult{
+				App:    name,
+				OK:     false,
+				Status: "failed",
+				Error:  err.Error(),
+			})
+			continue
+		}
+
+		results = append(results, triggerBackupResult{
+			App:    name,
+			OK:     true,
+			Status: "ok",
+		})
+	}
+
+	if !foundTarget {
+		writeError(w, http.StatusNotFound, "app not found")
+		return
+	}
+
+	success := true
+	for _, r := range results {
+		if !r.OK {
+			success = false
+			break
+		}
+	}
+
+	status := http.StatusOK
+	if !success {
+		status = http.StatusMultiStatus
+	}
+
+	writeJSON(w, status, triggerBackupResponse{
+		Success: success,
+		Results: results,
+	})
+}
 func (s *webServer) handleBackups(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
 	backendName := r.URL.Query().Get("backend")

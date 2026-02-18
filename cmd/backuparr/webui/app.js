@@ -1,6 +1,8 @@
 const appSelect = document.getElementById('appSelect');
 const backendSelect = document.getElementById('backendSelect');
 const refreshBtn = document.getElementById('refreshBtn');
+const backupSelectedBtn = document.getElementById('backupSelectedBtn');
+const backupAllBtn = document.getElementById('backupAllBtn');
 const statusEl = document.getElementById('status');
 const tbody = document.querySelector('#backupsTable tbody');
 
@@ -8,6 +10,12 @@ let apps = [];
 
 function setStatus(message) {
   statusEl.textContent = message || '';
+}
+
+function setBusy(isBusy) {
+  refreshBtn.disabled = isBusy;
+  backupSelectedBtn.disabled = isBusy;
+  backupAllBtn.disabled = isBusy;
 }
 
 function formatBytes(bytes) {
@@ -140,6 +148,33 @@ async function loadBackups() {
   setStatus(`${backups.length} backup(s)`);
 }
 
+async function triggerBackup(payload) {
+  setBusy(true);
+  try {
+    setStatus('Running backup...');
+
+    const res = await fetch('/api/backup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 207) {
+      throw new Error(body.error || 'backup failed');
+    }
+
+    const results = body.results || [];
+    const ok = results.filter(r => r.ok).length;
+    const failed = results.length - ok;
+    setStatus(`Backup complete: ${ok} succeeded, ${failed} failed`);
+
+    await loadBackups();
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function init() {
   try {
     await loadApps();
@@ -156,5 +191,20 @@ appSelect.addEventListener('change', async () => {
 
 backendSelect.addEventListener('change', loadBackups);
 refreshBtn.addEventListener('click', loadBackups);
+backupSelectedBtn.addEventListener('click', async () => {
+  try {
+    await triggerBackup({ app: selectedApp() });
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  }
+});
+
+backupAllBtn.addEventListener('click', async () => {
+  try {
+    await triggerBackup({ all: true });
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  }
+});
 
 init();
