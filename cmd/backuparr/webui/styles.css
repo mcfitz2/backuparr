@@ -15,6 +15,12 @@ h1 {
   margin: 0 0 8px;
 }
 
+h2 {
+  margin: 20px 0 10px;
+  font-size: 16px;
+  color: #cbd5e1;
+}
+
 .muted {
   color: #94a3b8;
 }
@@ -80,4 +86,23 @@ tr:last-child td {
 .danger {
   background: #7f1d1d;
   border-color: #991b1b;
+}
+
+.hidden {
+  display: none;
+}
+
+.logs {
+  margin: 0;
+  min-height: 140px;
+  max-height: 280px;
+  overflow: auto;
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 12px;
+  color: #cbd5e1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }

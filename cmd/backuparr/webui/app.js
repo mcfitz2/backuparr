@@ -4,9 +4,12 @@ const refreshBtn = document.getElementById('refreshBtn');
 const backupSelectedBtn = document.getElementById('backupSelectedBtn');
 const backupAllBtn = document.getElementById('backupAllBtn');
 const statusEl = document.getElementById('status');
+const logsSectionEl = document.getElementById('backupLogsSection');
+const logsEl = document.getElementById('backupLogs');
 const tbody = document.querySelector('#backupsTable tbody');
 
 let apps = [];
+let activeSocket = null;
 
 function setStatus(message) {
   statusEl.textContent = message || '';
@@ -16,6 +19,22 @@ function setBusy(isBusy) {
   refreshBtn.disabled = isBusy;
   backupSelectedBtn.disabled = isBusy;
   backupAllBtn.disabled = isBusy;
+}
+
+function showLogsSection(show) {
+  logsSectionEl.classList.toggle('hidden', !show);
+}
+
+function setLogs(lines) {
+  logsEl.textContent = (lines || []).join('\n');
+  logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function summarizeResults(job) {
+  const results = job.results || [];
+  const ok = results.filter(r => r.ok).length;
+  const failed = results.length - ok;
+  return { ok, failed, total: results.length };
 }
 
 function formatBytes(bytes) {
@@ -151,7 +170,9 @@ async function loadBackups() {
 async function triggerBackup(payload) {
   setBusy(true);
   try {
-    setStatus('Running backup...');
+    showLogsSection(true);
+    setStatus('Starting backup...');
+    setLogs([]);
 
     const res = await fetch('/api/backup', {
       method: 'POST',
@@ -160,14 +181,17 @@ async function triggerBackup(payload) {
     });
 
     const body = await res.json().catch(() => ({}));
-    if (!res.ok && res.status !== 207) {
+    if (!res.ok) {
       throw new Error(body.error || 'backup failed');
     }
 
-    const results = body.results || [];
-    const ok = results.filter(r => r.ok).length;
-    const failed = results.length - ok;
-    setStatus(`Backup complete: ${ok} succeeded, ${failed} failed`);
+    if (!body.jobId) {
+      throw new Error('backup job id missing');
+    }
+
+    const job = await streamJob(body.jobId);
+    const summary = summarizeResults(job);
+    setStatus(`Backup complete: ${summary.ok} succeeded, ${summary.failed} failed`);
 
     await loadBackups();
   } finally {
@@ -175,10 +199,101 @@ async function triggerBackup(payload) {
   }
 }
 
+function renderJobUpdate(job) {
+  if (job.error) {
+    throw new Error(job.error);
+  }
+
+  setLogs(job.logs || []);
+
+  if (job.running) {
+    setStatus(`Backup running (${job.status})...`);
+    return;
+  }
+
+  const summary = summarizeResults(job);
+  setStatus(`Backup ${job.status}: ${summary.ok} succeeded, ${summary.failed} failed`);
+}
+
+async function pollJobUntilDone(jobId) {
+  while (true) {
+    const params = new URLSearchParams({ id: jobId });
+    const res = await fetch(`/api/backup?${params.toString()}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || 'failed to poll backup job');
+
+    renderJobUpdate(body);
+    if (!body.running) return body;
+
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+function streamJob(jobId) {
+  return new Promise((resolve, reject) => {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = `${protocol}://${window.location.host}/api/backup/ws?id=${encodeURIComponent(jobId)}`;
+
+    let settled = false;
+    let lastJob = null;
+    const ws = new WebSocket(url);
+    activeSocket = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        renderJobUpdate(data);
+        lastJob = data;
+        if (data.running === false && !settled) {
+          settled = true;
+          ws.close();
+          resolve(data);
+        }
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      }
+    };
+
+    ws.onerror = () => {
+      // handled by onclose fallback
+    };
+
+    ws.onclose = async () => {
+      if (activeSocket === ws) {
+        activeSocket = null;
+      }
+      if (settled) return;
+      if (lastJob && lastJob.running === false) {
+        settled = true;
+        resolve(lastJob);
+        return;
+      }
+
+      try {
+        const finalJob = await pollJobUntilDone(jobId);
+        if (!settled) {
+          settled = true;
+          resolve(finalJob);
+        }
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      }
+    };
+  });
+}
+
 async function init() {
   try {
+    showLogsSection(false);
     await loadApps();
     await loadBackups();
+    setLogs([]);
   } catch (err) {
     setStatus(`Error: ${err.message}`);
   }

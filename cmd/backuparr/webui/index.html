@@ -9,7 +9,7 @@
   <body>
     <main class="container">
       <h1>Backuparr</h1>
-      <p class="muted">View and delete backups.</p>
+      <p class="muted">View, delete, and run backups with live status.</p>
 
       <section class="controls">
         <label>
@@ -23,6 +23,11 @@
         <button id="refreshBtn">Refresh</button>
         <button id="backupSelectedBtn">Run selected backup</button>
         <button id="backupAllBtn">Run all backups</button>
+      </section>
+
+      <section id="backupLogsSection" class="hidden">
+        <h2>Live backup logs</h2>
+        <pre id="backupLogs" class="logs" aria-live="polite"></pre>
       </section>
 
       <section>
