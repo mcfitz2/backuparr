@@ -88,6 +88,94 @@ tr:last-child td {
   border-color: #991b1b;
 }
 
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  margin-right: 4px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+}
+
+.badge-latest {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+
+.badge-hourly {
+  background: #1e3a5f;
+  color: #7dd3fc;
+}
+
+.badge-daily {
+  background: #14532d;
+  color: #86efac;
+}
+
+.badge-weekly {
+  background: #422006;
+  color: #fcd34d;
+}
+
+.badge-monthly {
+  background: #4c1d95;
+  color: #c4b5fd;
+}
+
+.badge-yearly {
+  background: #831843;
+  color: #f9a8d4;
+}
+
+.badge-prunable {
+  background: #1f2937;
+  color: #6b7280;
+}
+
+.retention-panel {
+  margin-bottom: 18px;
+}
+
+.retention-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.retention-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 72px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #111827;
+}
+
+.retention-value {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.retention-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+}
+
+.retention-latest  .retention-value { color: #93c5fd; }
+.retention-hourly  .retention-value { color: #7dd3fc; }
+.retention-daily   .retention-value { color: #86efac; }
+.retention-weekly  .retention-value { color: #fcd34d; }
+.retention-monthly .retention-value { color: #c4b5fd; }
+.retention-yearly  .retention-value { color: #f9a8d4; }
+
 .hidden {
   display: none;
 }

@@ -11,6 +11,38 @@ const tbody = document.querySelector('#backupsTable tbody');
 let apps = [];
 let activeSocket = null;
 
+const retentionGrid = document.getElementById('retentionGrid');
+
+function updateRetentionPanel() {
+  const app = apps.find(a => a.name === selectedApp());
+  retentionGrid.innerHTML = '';
+  if (!app) return;
+
+  const r = app.retention || {};
+  const items = [
+    { label: 'Last',    value: r.keepLast,    cls: 'latest' },
+    { label: 'Hourly',  value: r.keepHourly,  cls: 'hourly' },
+    { label: 'Daily',   value: r.keepDaily,   cls: 'daily' },
+    { label: 'Weekly',  value: r.keepWeekly,  cls: 'weekly' },
+    { label: 'Monthly', value: r.keepMonthly, cls: 'monthly' },
+    { label: 'Yearly',  value: r.keepYearly,  cls: 'yearly' },
+  ];
+
+  items.forEach(({ label, value, cls }) => {
+    const card = document.createElement('div');
+    card.className = `retention-card retention-${cls}`;
+    const num = document.createElement('span');
+    num.className = 'retention-value';
+    num.textContent = value || 0;
+    const lbl = document.createElement('span');
+    lbl.className = 'retention-label';
+    lbl.textContent = label;
+    card.appendChild(num);
+    card.appendChild(lbl);
+    retentionGrid.appendChild(card);
+  });
+}
+
 function setStatus(message) {
   statusEl.textContent = message || '';
 }
@@ -67,6 +99,7 @@ function updateBackends() {
     opt.textContent = name;
     backendSelect.appendChild(opt);
   });
+  updateRetentionPanel();
 }
 
 async function loadApps() {
@@ -137,6 +170,22 @@ async function loadBackups() {
     const created = b.CreatedAt || b.createdAt;
     createdTd.textContent = created ? new Date(created).toLocaleString() : '-';
 
+    const retentionTd = document.createElement('td');
+    const buckets = b.retentionBuckets || [];
+    if (buckets.length > 0) {
+      buckets.forEach(label => {
+        const badge = document.createElement('span');
+        badge.className = `badge badge-${label}`;
+        badge.textContent = label;
+        retentionTd.appendChild(badge);
+      });
+    } else {
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-prunable';
+      badge.textContent = 'prunable';
+      retentionTd.appendChild(badge);
+    }
+
     const keyTd = document.createElement('td');
     keyTd.className = 'key';
     const key = b.Key || b.key;
@@ -159,6 +208,7 @@ async function loadBackups() {
     tr.appendChild(fileTd);
     tr.appendChild(sizeTd);
     tr.appendChild(createdTd);
+    tr.appendChild(retentionTd);
     tr.appendChild(keyTd);
     tr.appendChild(actionTd);
     tbody.appendChild(tr);
