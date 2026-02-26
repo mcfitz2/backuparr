@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"backuparr/internal/config"
+	"backuparr/internal/storage"
 	"github.com/gorilla/websocket"
 )
 
@@ -58,9 +59,19 @@ type webServer struct {
 }
 
 type appOption struct {
-	Name     string   `json:"name"`
-	AppType  string   `json:"appType"`
-	Backends []string `json:"backends"`
+	Name      string          `json:"name"`
+	AppType   string          `json:"appType"`
+	Backends  []string        `json:"backends"`
+	Retention retentionInfo   `json:"retention"`
+}
+
+type retentionInfo struct {
+	KeepLast    int `json:"keepLast"`
+	KeepHourly  int `json:"keepHourly"`
+	KeepDaily   int `json:"keepDaily"`
+	KeepWeekly  int `json:"keepWeekly"`
+	KeepMonthly int `json:"keepMonthly"`
+	KeepYearly  int `json:"keepYearly"`
 }
 
 type appsResponse struct {
@@ -169,6 +180,14 @@ func (s *webServer) handleApps(w http.ResponseWriter, r *http.Request) {
 			Name:     name,
 			AppType:  ac.AppType,
 			Backends: backends,
+			Retention: retentionInfo{
+				KeepLast:    ac.Retention.KeepLast,
+				KeepHourly:  ac.Retention.KeepHourly,
+				KeepDaily:   ac.Retention.KeepDaily,
+				KeepWeekly:  ac.Retention.KeepWeekly,
+				KeepMonthly: ac.Retention.KeepMonthly,
+				KeepYearly:  ac.Retention.KeepYearly,
+			},
 		})
 	}
 
@@ -525,7 +544,36 @@ func (s *webServer) handleBackups(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to list backups")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"backups": backups})
+
+		policy := toStorageRetention(appCfg.Retention)
+		bucketMap := storage.ClassifyRetentionBuckets(backups, policy)
+
+		type backupWithBuckets struct {
+			Key              string    `json:"key"`
+			AppName          string    `json:"appName"`
+			FileName         string    `json:"fileName"`
+			Size             int64     `json:"size"`
+			CreatedAt        time.Time `json:"createdAt"`
+			RetentionBuckets []string  `json:"retentionBuckets"`
+		}
+
+		enriched := make([]backupWithBuckets, 0, len(backups))
+		for _, b := range backups {
+			buckets := bucketMap[b.Key]
+			if buckets == nil {
+				buckets = []string{}
+			}
+			enriched = append(enriched, backupWithBuckets{
+				Key:              b.Key,
+				AppName:          b.AppName,
+				FileName:         b.FileName,
+				Size:             b.Size,
+				CreatedAt:        b.CreatedAt,
+				RetentionBuckets: buckets,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"backups": enriched})
 	case http.MethodDelete:
 		key := r.URL.Query().Get("key")
 		if key == "" {

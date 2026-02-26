@@ -128,3 +128,56 @@ func truncateMonth(t time.Time) time.Time {
 func truncateYear(t time.Time) time.Time {
 	return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, t.Location())
 }
+
+// ClassifyRetentionBuckets returns a map from backup key to the retention
+// bucket labels (e.g. "daily", "weekly") that justify keeping it. Backups
+// that would be pruned are mapped to an empty slice.
+func ClassifyRetentionBuckets(backups []BackupMetadata, policy RetentionPolicy) map[string][]string {
+	labels := make(map[string][]string, len(backups))
+	for _, b := range backups {
+		labels[b.Key] = nil
+	}
+
+	sorted := make([]BackupMetadata, len(backups))
+	copy(sorted, backups)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
+	})
+
+	// KeepLast
+	for i := 0; i < policy.KeepLast && i < len(sorted); i++ {
+		labels[sorted[i].Key] = append(labels[sorted[i].Key], "latest")
+	}
+
+	type bucketDef struct {
+		count    int
+		truncate func(time.Time) time.Time
+		label    string
+	}
+	defs := []bucketDef{
+		{policy.KeepHourly, truncateHour, "hourly"},
+		{policy.KeepDaily, truncateDay, "daily"},
+		{policy.KeepWeekly, truncateWeek, "weekly"},
+		{policy.KeepMonthly, truncateMonth, "monthly"},
+		{policy.KeepYearly, truncateYear, "yearly"},
+	}
+
+	for _, def := range defs {
+		if def.count <= 0 {
+			continue
+		}
+		seen := make(map[time.Time]bool)
+		for _, b := range sorted {
+			bucket := def.truncate(b.CreatedAt)
+			if !seen[bucket] {
+				seen[bucket] = true
+				labels[b.Key] = append(labels[b.Key], def.label)
+				if len(seen) >= def.count {
+					break
+				}
+			}
+		}
+	}
+
+	return labels
+}

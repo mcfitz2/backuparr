@@ -25,6 +25,11 @@
         <button id="backupAllBtn">Run all backups</button>
       </section>
 
+      <section id="retentionSection" class="retention-panel">
+        <h2>Retention policy</h2>
+        <div id="retentionGrid" class="retention-grid"></div>
+      </section>
+
       <section id="backupLogsSection" class="hidden">
         <h2>Live backup logs</h2>
         <pre id="backupLogs" class="logs" aria-live="polite"></pre>
@@ -37,6 +42,7 @@
               <th>File</th>
               <th>Size</th>
               <th>Created</th>
+              <th>Retention</th>
               <th>Key</th>
               <th></th>
             </tr>
