@@ -370,10 +370,7 @@ func (s *webServer) executeBackupJob(id string) {
 	jobLogs := make([]string, 0, 32)
 
 	for _, appCfg := range s.cfg.AppConfigs {
-		name := appCfg.Name
-		if name == "" {
-			name = appCfg.AppType
-		}
+		name := appDisplayName(appCfg)
 		if targetApp != "" && name != targetApp {
 			continue
 		}
@@ -404,6 +401,15 @@ func (s *webServer) executeBackupJob(id string) {
 
 		results = append(results, triggerBackupResult{App: name, OK: true, Status: "ok"})
 		s.appendJobLog(id, fmt.Sprintf("[%s] backup completed", name))
+	}
+
+	if len(results) == 0 {
+		msg := "No targets configured"
+		if targetApp != "" {
+			msg = fmt.Sprintf("No matching app for %q", targetApp)
+		}
+		s.finishJob(id, false, results, []string{msg})
+		return
 	}
 
 	success := true

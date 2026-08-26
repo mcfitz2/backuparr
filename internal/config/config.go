@@ -1,7 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -74,7 +77,16 @@ func Parse(path string) (BackuparrConfig, error) {
 		return BackuparrConfig{}, fmt.Errorf("error reading config file: %w", err)
 	}
 	var cfg BackuparrConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	// Strict: an unknown or misspelled key (e.g. "appconfigs") is a
+	// misconfiguration, not something to silently ignore into an empty config.
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
+		// An empty file decodes to io.EOF. Treat it as an empty config and let
+		// the caller report the missing targets.
+		if errors.Is(err, io.EOF) {
+			return BackuparrConfig{}, nil
+		}
 		return BackuparrConfig{}, fmt.Errorf("error parsing config: %w", err)
 	}
 	return cfg, nil
