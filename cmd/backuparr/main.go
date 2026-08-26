@@ -136,6 +136,16 @@ func createBackends(configs []config.StorageConfig) ([]storage.Backend, error) {
 	return backends, nil
 }
 
+// appDisplayName returns the effective name for an app config, falling back to
+// the app type when no explicit name is set. Configs can hold several targets
+// of the same type, so the name is what identifies a target in logs.
+func appDisplayName(cfg config.AppConfig) string {
+	if cfg.Name != "" {
+		return cfg.Name
+	}
+	return cfg.AppType
+}
+
 func toStorageRetention(r config.RetentionPolicy) storage.RetentionPolicy {
 	return storage.RetentionPolicy{
 		KeepLast:    r.KeepLast,
@@ -154,7 +164,9 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
-	defer reader.Close()
+	if reader != nil {
+		defer reader.Close()
+	}
 
 	// Read backup into memory (needed for uploading to multiple backends)
 	data, err := io.ReadAll(reader)
@@ -167,23 +179,36 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 	// Generate consistent filename
 	fileName := storage.FormatBackupName(app.Name(), time.Now())
 
-	// Upload to each backend sequentially
+	storageRetention := toStorageRetention(retention)
+
+	// Upload to each backend sequentially. A failure on one destination does not
+	// stop the others, but every configured destination is a promised copy, so
+	// any failure makes the whole backup a failure for the caller.
+	var failedUploads []string
+
 	for _, backend := range backends {
 		meta, err := backend.Upload(ctx, app.Name(), fileName, bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			log.Printf("[%s] Failed to upload to %s: %v", app.Name(), backend.Name(), err)
+			failedUploads = append(failedUploads, fmt.Sprintf("%s: %v", backend.Name(), err))
 			continue
 		}
 		log.Printf("[%s] Uploaded to %s: %s (%d bytes)", app.Name(), backend.Name(), meta.FileName, meta.Size)
 
-		// Apply retention policy
-		storageRetention := toStorageRetention(retention)
+		// Apply retention policy. Pruning is housekeeping that runs after the
+		// backup is safely stored, so a failure here is logged but does not
+		// fail the backup.
 		deleted, err := storage.ApplyRetention(ctx, backend, app.Name(), storageRetention)
 		if err != nil {
 			log.Printf("[%s] Retention cleanup failed on %s: %v", app.Name(), backend.Name(), err)
 		} else if deleted > 0 {
 			log.Printf("[%s] Cleaned up %d old backup(s) from %s", app.Name(), deleted, backend.Name())
 		}
+	}
+
+	if len(failedUploads) > 0 {
+		return fmt.Errorf("upload failed for %d of %d destination(s): %s",
+			len(failedUploads), len(backends), strings.Join(failedUploads, "; "))
 	}
 
 	return nil
@@ -261,23 +286,43 @@ func runBackupAll() {
 		log.Fatalf("Preflight check failed: %v", err)
 	}
 
+	if len(cfg.AppConfigs) == 0 {
+		log.Fatalf("No targets configured: appConfigs is empty in %s", config.Path())
+	}
+
+	// A broken target must not stop the others, but the run has to end in a
+	// non-zero exit code so a scheduler can tell it apart from a clean run.
+	var failed []string
+
 	for _, appCfg := range cfg.AppConfigs {
+		name := appDisplayName(appCfg)
+
 		client, err := createClient(appCfg)
 		if err != nil {
-			log.Printf("Failed to create client for %s: %v", appCfg.AppType, err)
+			log.Printf("[%s] Failed to create client: %v", name, err)
+			failed = append(failed, name)
 			continue
 		}
 
 		backends, err := createBackends(appCfg.Storage)
 		if err != nil {
-			log.Printf("[%s] Failed to create storage backends: %v", appCfg.AppType, err)
+			log.Printf("[%s] Failed to create storage backends: %v", name, err)
+			failed = append(failed, name)
 			continue
 		}
 
 		if err := runBackup(ctx, client, backends, appCfg.Retention); err != nil {
-			log.Printf("[%s] Backup failed: %v", appCfg.AppType, err)
+			log.Printf("[%s] Backup failed: %v", name, err)
+			failed = append(failed, name)
 		}
 	}
+
+	if len(failed) > 0 {
+		log.Printf("%d of %d targets failed: %s", len(failed), len(cfg.AppConfigs), strings.Join(failed, ", "))
+		os.Exit(1)
+	}
+
+	log.Printf("All %d target(s) backed up successfully", len(cfg.AppConfigs))
 }
 
 func runRestoreCLI() {
@@ -417,21 +462,13 @@ func runListCLI() {
 // It matches against the Name field first, then falls back to AppType.
 func findAppConfig(cfg config.BackuparrConfig, appName string) (config.AppConfig, error) {
 	for _, ac := range cfg.AppConfigs {
-		effectiveName := ac.Name
-		if effectiveName == "" {
-			effectiveName = ac.AppType
-		}
-		if effectiveName == appName {
+		if appDisplayName(ac) == appName {
 			return ac, nil
 		}
 	}
 	var names []string
 	for _, ac := range cfg.AppConfigs {
-		if ac.Name != "" {
-			names = append(names, ac.Name)
-		} else {
-			names = append(names, ac.AppType)
-		}
+		names = append(names, appDisplayName(ac))
 	}
 	return config.AppConfig{}, fmt.Errorf("app %q not found in config (available: %v)", appName, names)
 }
