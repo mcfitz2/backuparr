@@ -366,6 +366,9 @@ func TestS3Backend_Upload_SinglePart(t *testing.T) {
 	var gotMethod, gotPath string
 	backend := newFakeS3Backend(t, func(w http.ResponseWriter, r *http.Request) {
 		gotMethod, gotPath = r.Method, r.URL.Path
+		// Drain the body: an unread large request body left when the handler
+		// returns makes the OS close the connection with a RST on Linux.
+		io.Copy(io.Discard, r.Body)
 		w.Header().Set("ETag", `"single-part-etag"`)
 		w.WriteHeader(http.StatusOK)
 	})
@@ -404,6 +407,7 @@ func TestS3Backend_Upload_Multipart(t *testing.T) {
 	)
 
 	backend := newFakeS3Backend(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
 		q := r.URL.Query()
 		switch {
 		case r.Method == http.MethodPost && q.Has("uploads"):
