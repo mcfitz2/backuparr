@@ -2,10 +2,14 @@ package backup
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +31,33 @@ type RetryTransport struct {
 // beyond this limit is discarded.
 const maxBufferedErrorBody = 64 * 1024 // 64KB
 
+// maxBufferedRequestBody caps how much of a request body RetryTransport will
+// buffer itself in order to replay it on retry. Requests larger than this
+// with no caller-supplied GetBody are sent once, unretried, instead of being
+// held entirely in memory.
+const maxBufferedRequestBody = 1 << 20 // 1MB
+
+// replayableContextKey is the context key used by WithReplayableRequest.
+type replayableContextKey struct{}
+
+// WithReplayableRequest marks ctx so that RetryTransport will retry a
+// request built from it even though its method (e.g. POST) isn't
+// idempotent by convention. This must be opted into deliberately by the
+// caller: an auto-populated req.GetBody (which http.NewRequest sets for
+// *bytes.Buffer, *bytes.Reader, and *strings.Reader bodies) only means the
+// body CAN be regenerated, not that the server-side effect of resending
+// the request is safe — so GetBody alone is never sufficient to authorize
+// retrying a non-idempotent method.
+func WithReplayableRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, replayableContextKey{}, true)
+}
+
+// isReplayableRequest reports whether ctx was marked via WithReplayableRequest.
+func isReplayableRequest(ctx context.Context) bool {
+	v, _ := ctx.Value(replayableContextKey{}).(bool)
+	return v
+}
+
 // NewRetryTransport creates a RetryTransport with sensible defaults:
 // 3 retries with 2s base delay (2s, 4s, 8s backoff).
 // If base is nil, http.DefaultTransport is used.
@@ -43,15 +74,39 @@ func NewRetryTransport(base http.RoundTripper) *RetryTransport {
 
 // RoundTrip executes the request with automatic retries on transient failures.
 func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Buffer the request body so we can replay it on retries.
+	// A request can only be retried if resending it is safe: GET/HEAD/PUT/DELETE
+	// are idempotent by convention; anything else (e.g. POST) needs the caller
+	// to have explicitly marked its context with WithReplayableRequest.
+	// req.GetBody is deliberately NOT treated as opt-in here — http.NewRequest
+	// auto-populates it for common body types regardless of programmer intent,
+	// so its presence only means the body can be regenerated, not that
+	// resending the request is safe. Otherwise a single attempt is made and
+	// its result (success or failure) is returned as-is — retrying could
+	// duplicate a real side effect, e.g. a restore upload or a restart command.
+	if !isReplayableMethod(req.Method) && !isReplayableRequest(req.Context()) {
+		return t.Base.RoundTrip(req)
+	}
+
+	getBody := req.GetBody
 	var bodyBytes []byte
-	if req.Body != nil && req.Body != http.NoBody {
-		var err error
-		bodyBytes, err = io.ReadAll(req.Body)
-		req.Body.Close()
+	if getBody == nil && req.Body != nil && req.Body != http.NoBody {
+		buf, err := io.ReadAll(io.LimitReader(req.Body, maxBufferedRequestBody+1))
 		if err != nil {
+			req.Body.Close()
 			return nil, err
 		}
+		if len(buf) > maxBufferedRequestBody {
+			// Too large to hold in memory for replay; reassemble the body
+			// from what's already been read and what's left, then send it
+			// once, unretried.
+			req.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(buf), req.Body), req.Body}
+			return t.Base.RoundTrip(req)
+		}
+		req.Body.Close()
+		bodyBytes = buf
 	}
 
 	maxRetries := t.MaxRetries
@@ -74,10 +129,17 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		// Clone the request for each attempt to avoid modifying the original
 		attemptReq := req.Clone(req.Context())
-		if bodyBytes != nil {
+		switch {
+		case getBody != nil:
+			rc, err := getBody()
+			if err != nil {
+				return nil, err
+			}
+			attemptReq.Body = rc
+		case bodyBytes != nil:
 			attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			attemptReq.ContentLength = int64(len(bodyBytes))
-		} else {
+		default:
 			attemptReq.Body = http.NoBody
 			attemptReq.ContentLength = 0
 		}
@@ -144,6 +206,17 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return nil, req.Context().Err()
 }
 
+// isReplayableMethod returns true for HTTP methods that are safe to retry
+// without an explicit WithReplayableRequest opt-in, because resending them
+// is idempotent by convention.
+func isReplayableMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
+		return true
+	}
+	return false
+}
+
 // isRetryableStatus returns true for HTTP status codes that indicate a transient server error.
 func isRetryableStatus(status int) bool {
 	switch status {
@@ -161,23 +234,28 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	retryable := []string{
-		"eof",
-		"connection reset",
-		"connection refused",
-		"broken pipe",
-		"timeout",
-		"deadline exceeded",
-		"tls handshake",
-		"temporary failure",
-		"server closed",
-		"transport connection broken",
+
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
 	}
-	for _, pattern := range retryable {
-		if strings.Contains(s, pattern) {
-			return true
-		}
+	if errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
 	}
-	return false
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// net.Error covers dial/read/write timeouts and TLS handshake timeouts
+	// (all of which implement Timeout() == true), plus transient DNS
+	// resolution failures, which only expose Temporary() == true.
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+
+	// http.Transport's "server closed idle connection" error has no
+	// exported sentinel or type to compare against.
+	return strings.Contains(err.Error(), "server closed idle connection")
 }
