@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -168,13 +167,26 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 		defer reader.Close()
 	}
 
-	// Read backup into memory (needed for uploading to multiple backends)
-	data, err := io.ReadAll(reader)
+	// Spool to a temp file instead of buffering in memory: multiple backends
+	// each need their own fresh reader over the full backup, and the source
+	// stream can only be consumed once. This trades memory for disk.
+	tmp, err := os.CreateTemp("", "backuparr-*.zip")
 	if err != nil {
-		return fmt.Errorf("failed to read backup data: %w", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	size, copyErr := io.Copy(tmp, reader)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return fmt.Errorf("failed to write backup data: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("failed to write backup data: %w", closeErr)
 	}
 
-	logger.Printf("[%s] Backup created: %s (%d bytes)", app.Name(), result.Name, len(data))
+	logger.Printf("[%s] Backup created: %s (%d bytes)", app.Name(), result.Name, size)
 
 	// Generate consistent filename
 	fileName := storage.FormatBackupName(app.Name(), time.Now())
@@ -187,7 +199,15 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 	var failedUploads []string
 
 	for _, backend := range backends {
-		meta, err := backend.Upload(ctx, app.Name(), fileName, bytes.NewReader(data), int64(len(data)))
+		f, err := os.Open(tmpPath)
+		if err != nil {
+			logger.Printf("[%s] Failed to reopen backup data for %s: %v", app.Name(), backend.Name(), err)
+			failedUploads = append(failedUploads, fmt.Sprintf("%s: %v", backend.Name(), err))
+			continue
+		}
+
+		meta, err := backend.Upload(ctx, app.Name(), fileName, f, size)
+		f.Close()
 		if err != nil {
 			logger.Printf("[%s] Failed to upload to %s: %v", app.Name(), backend.Name(), err)
 			failedUploads = append(failedUploads, fmt.Sprintf("%s: %v", backend.Name(), err))

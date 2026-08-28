@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -402,5 +404,227 @@ func TestAppDisplayName(t *testing.T) {
 				t.Errorf("appDisplayName() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// --- runBackup temp-file spooling ------------------------------------------
+//
+// runBackup no longer buffers the whole backup as a []byte; it spools the
+// source reader to a temp file (named "backuparr-*.zip") and re-opens that
+// file once per backend. These tests check the observable consequences of
+// that: the temp file is always cleaned up, and every backend still gets an
+// independent, complete, byte-identical copy of the backup.
+
+func tempBackupFiles(t *testing.T) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "backuparr-*.zip"))
+	if err != nil {
+		t.Fatalf("glob temp dir: %v", err)
+	}
+	return matches
+}
+
+func TestRunBackup_TempFileRemovedOnSuccess(t *testing.T) {
+	before := tempBackupFiles(t)
+
+	client := &fakeClient{name: "sonarr", data: []byte("backup-data")}
+	backend := &fakeBackend{name: "local"}
+
+	if err := runBackup(context.Background(), client, []storage.Backend{backend}, config.RetentionPolicy{}, log.Default()); err != nil {
+		t.Fatalf("runBackup() = %v, want nil", err)
+	}
+
+	after := tempBackupFiles(t)
+	if len(after) != len(before) {
+		t.Errorf("temp backup file(s) leaked after success: before=%v after=%v", before, after)
+	}
+}
+
+func TestRunBackup_TempFileRemovedOnUploadError(t *testing.T) {
+	before := tempBackupFiles(t)
+
+	client := &fakeClient{name: "sonarr", data: []byte("backup-data")}
+	backend := &fakeBackend{name: "s3", uploadErr: errors.New("connection refused")}
+
+	err := runBackup(context.Background(), client, []storage.Backend{backend}, config.RetentionPolicy{}, log.Default())
+	if err == nil {
+		t.Fatal("runBackup() = nil, want error")
+	}
+
+	after := tempBackupFiles(t)
+	if len(after) != len(before) {
+		t.Errorf("temp backup file(s) leaked after upload error: before=%v after=%v", before, after)
+	}
+}
+
+func TestRunBackup_TempFileRemovedOnAppBackupError(t *testing.T) {
+	before := tempBackupFiles(t)
+
+	// Backup() fails before a temp file would even be created; verifies the
+	// early-return path leaves nothing behind either.
+	client := &fakeClient{name: "truenas", backupErr: errors.New("API key was rejected")}
+	backend := &fakeBackend{name: "local"}
+
+	err := runBackup(context.Background(), client, []storage.Backend{backend}, config.RetentionPolicy{}, log.Default())
+	if err == nil {
+		t.Fatal("runBackup() = nil, want error")
+	}
+
+	after := tempBackupFiles(t)
+	if len(after) != len(before) {
+		t.Errorf("temp backup file(s) leaked after app backup error: before=%v after=%v", before, after)
+	}
+}
+
+// recordingBackend captures the exact bytes it receives via Upload, so tests
+// can verify every backend gets a complete, independent, identical copy of
+// the backup when a single source is fanned out to several destinations —
+// the regression most likely to be introduced by removing the shared []byte.
+type recordingBackend struct {
+	name     string
+	received []byte
+	size     int64
+}
+
+func (b *recordingBackend) Type() string        { return "recording" }
+func (b *recordingBackend) Name() string        { return b.name }
+func (b *recordingBackend) SetName(name string) { b.name = name }
+
+func (b *recordingBackend) Upload(ctx context.Context, appName, fileName string, data io.Reader, size int64) (*storage.BackupMetadata, error) {
+	got, err := io.ReadAll(data)
+	if err != nil {
+		return nil, err
+	}
+	b.received = got
+	b.size = size
+	return &storage.BackupMetadata{Key: appName + "/" + fileName, AppName: appName, FileName: fileName, Size: size}, nil
+}
+
+func (b *recordingBackend) Download(ctx context.Context, key string) (io.ReadCloser, *storage.BackupMetadata, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
+func (b *recordingBackend) List(ctx context.Context, appName string) ([]storage.BackupMetadata, error) {
+	return nil, nil
+}
+
+func (b *recordingBackend) Delete(ctx context.Context, key string) error { return nil }
+
+func TestRunBackup_MultipleBackendsReceiveIdenticalData(t *testing.T) {
+	// Large enough (~128KB) that a bug sharing one file offset/cursor across
+	// backends, or truncating anything but the first backend, would surface.
+	want := bytes.Repeat([]byte("backuparr-multi-backend-payload-"), 4096)
+	client := &fakeClient{name: "sonarr", data: want}
+
+	backends := []storage.Backend{
+		&recordingBackend{name: "local"},
+		&recordingBackend{name: "s3"},
+		&recordingBackend{name: "nas"},
+	}
+
+	if err := runBackup(context.Background(), client, backends, config.RetentionPolicy{}, log.Default()); err != nil {
+		t.Fatalf("runBackup() = %v, want nil", err)
+	}
+
+	for _, b := range backends {
+		rb := b.(*recordingBackend)
+		if rb.size != int64(len(want)) {
+			t.Errorf("backend %s: size = %d, want %d", rb.name, rb.size, len(want))
+		}
+		if !bytes.Equal(rb.received, want) {
+			t.Errorf("backend %s: received %d bytes not matching source (want %d bytes); data corrupted or truncated across backends", rb.name, len(rb.received), len(want))
+		}
+	}
+}
+
+// countingReader emits deterministic bytes without ever holding the full
+// payload in memory, standing in for a large real backup stream.
+type countingReader struct {
+	remaining int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := int64(0); i < n; i++ {
+		p[i] = byte(i)
+	}
+	r.remaining -= n
+	return int(n), nil
+}
+
+// streamingClient is a backup.Client whose Backup() returns a reader that
+// generates its payload lazily instead of handing back a pre-built []byte.
+type streamingClient struct {
+	name  string
+	total int64
+}
+
+func (c *streamingClient) Name() string { return c.name }
+
+func (c *streamingClient) Backup(ctx context.Context) (*backup.BackupResult, io.ReadCloser, error) {
+	return &backup.BackupResult{Name: c.name, Size: c.total, CreatedAt: time.Now()},
+		io.NopCloser(&countingReader{remaining: c.total}), nil
+}
+
+func (c *streamingClient) Restore(ctx context.Context, r io.Reader) error { return nil }
+
+// hashingBackend consumes the upload stream via io.Copy to io.Discard instead
+// of retaining it, so the test itself doesn't need to hold the payload in
+// memory either.
+type hashingBackend struct {
+	name string
+	n    int64
+}
+
+func (b *hashingBackend) Type() string        { return "hashing" }
+func (b *hashingBackend) Name() string        { return b.name }
+func (b *hashingBackend) SetName(name string) { b.name = name }
+
+func (b *hashingBackend) Upload(ctx context.Context, appName, fileName string, data io.Reader, size int64) (*storage.BackupMetadata, error) {
+	n, err := io.Copy(io.Discard, data)
+	if err != nil {
+		return nil, err
+	}
+	b.n = n
+	return &storage.BackupMetadata{Key: appName + "/" + fileName, AppName: appName, FileName: fileName, Size: size}, nil
+}
+
+func (b *hashingBackend) Download(ctx context.Context, key string) (io.ReadCloser, *storage.BackupMetadata, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
+func (b *hashingBackend) List(ctx context.Context, appName string) ([]storage.BackupMetadata, error) {
+	return nil, nil
+}
+
+func (b *hashingBackend) Delete(ctx context.Context, key string) error { return nil }
+
+// TestRunBackup_StreamsWithoutFullBuffering runs a payload much larger than
+// would be comfortable to hold as a single []byte (as the old
+// io.ReadAll-based implementation did) through runBackup, and checks the
+// exact byte count survives end to end.
+//
+// NOTE: this test does not measure process memory and cannot by itself prove
+// peak RSS stayed flat for a 256MiB backup — that guarantee comes from
+// runBackup spooling via io.Copy (fixed-size internal buffer) to a temp file
+// and re-opening it per backend, rather than io.ReadAll into one []byte. This
+// test only proves the streaming path is still functionally correct at a
+// size where "just buffer it" would be a real cost, not that memory is bounded.
+func TestRunBackup_StreamsWithoutFullBuffering(t *testing.T) {
+	const total = 256 * 1024 * 1024 // 256MiB
+	client := &streamingClient{name: "sonarr", total: total}
+	backend := &hashingBackend{name: "local"}
+
+	if err := runBackup(context.Background(), client, []storage.Backend{backend}, config.RetentionPolicy{}, log.Default()); err != nil {
+		t.Fatalf("runBackup() = %v, want nil", err)
+	}
+	if backend.n != total {
+		t.Errorf("backend received %d bytes, want %d", backend.n, total)
 	}
 }
