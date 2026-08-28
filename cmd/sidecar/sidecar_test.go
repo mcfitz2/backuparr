@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -91,7 +92,30 @@ func TestShouldExclude(t *testing.T) {
 // Backup creation
 // ---------------------------------------------------------------------------
 
+// requireSQLite3 skips the test if the sqlite3 CLI isn't on PATH, and
+// returns its path. safeCopySQLite's `.backup` path (success, forced
+// failure, and quoting) can only be exercised with the real binary.
+func requireSQLite3(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 CLI not available")
+	}
+	return path
+}
+
+// writeRealSQLiteDB creates a genuine (not just magic-header-stubbed)
+// SQLite database at path, so that `sqlite3 .backup` succeeds against it.
+func writeRealSQLiteDB(t *testing.T, sqlite3Path, path string) {
+	t.Helper()
+	cmd := exec.Command(sqlite3Path, path, "CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1);")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to create real sqlite3 fixture: %v (%s)", err, out)
+	}
+}
+
 func TestCreateBackup(t *testing.T) {
+	sqlite3Path := requireSQLite3(t)
 	dir := t.TempDir()
 
 	os.MkdirAll(filepath.Join(dir, "subdir"), 0o755)
@@ -99,10 +123,9 @@ func TestCreateBackup(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "subdir", "data.txt"), []byte("some data"), 0o644)
 	os.WriteFile(filepath.Join(dir, "app.log"), []byte("log entry"), 0o644)
 
-	// Fake SQLite file (magic header)
-	sqliteData := make([]byte, 100)
-	copy(sqliteData, []byte("SQLite format 3\000"))
-	os.WriteFile(filepath.Join(dir, "app.db"), sqliteData, 0o644)
+	// A real SQLite database, so that `.backup` succeeds against it rather
+	// than falling back or hard-failing.
+	writeRealSQLiteDB(t, sqlite3Path, filepath.Join(dir, "app.db"))
 
 	// Auxiliary files that should be auto-skipped
 	os.WriteFile(filepath.Join(dir, "app.db-wal"), []byte("wal data"), 0o644)
@@ -119,6 +142,9 @@ func TestCreateBackup(t *testing.T) {
 	}
 	if stats.SQLiteFiles != 1 {
 		t.Errorf("SQLiteFiles = %d, want 1", stats.SQLiteFiles)
+	}
+	if stats.SQLiteFallback != 0 {
+		t.Errorf("SQLiteFallback = %d, want 0 (a real db backed up via `.backup` is not a fallback)", stats.SQLiteFallback)
 	}
 
 	// Verify ZIP contents
@@ -152,6 +178,177 @@ func TestCreateBackup_EmptyDir(t *testing.T) {
 	}
 	if stats.TotalFiles != 0 {
 		t.Errorf("TotalFiles = %d, want 0", stats.TotalFiles)
+	}
+}
+
+// TestCreateBackup_SkipsSymlink verifies that a symlink in the backup tree
+// is neither dereferenced into the archive nor left to silently replace a
+// real file. Before the fix, filepath.Walk's Lstat-based info fell through
+// to the file-copy branch, and os.Open(sourcePath) followed the link,
+// copying the target's bytes into the archive under the link's name.
+func TestCreateBackup_SkipsSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	outside := t.TempDir()
+	secretPath := filepath.Join(outside, "secret.txt")
+	os.WriteFile(secretPath, []byte("outside-the-backup-root"), 0o644)
+
+	os.WriteFile(filepath.Join(dir, "real.txt"), []byte("real content"), 0o644)
+	linkPath := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(secretPath, linkPath); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(origOutput) })
+
+	var buf bytes.Buffer
+	stats, err := createBackup(dir, nil, &buf)
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if stats.TotalFiles != 1 {
+		t.Errorf("TotalFiles = %d, want 1 (only real.txt; symlink skipped)", stats.TotalFiles)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("zip.NewReader: %v", err)
+	}
+	for _, f := range zr.File {
+		if f.Name == "link.txt" {
+			rc, _ := f.Open()
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			t.Fatalf("archive contains symlink entry %q with content %q; want it absent", f.Name, data)
+		}
+	}
+
+	if !strings.Contains(logBuf.String(), "link.txt") {
+		t.Errorf("expected symlink skip to be logged, got: %q", logBuf.String())
+	}
+}
+
+// TestCreateBackup_SQLiteBackupFailureIsHardError verifies that when sqlite3
+// is present but `.backup` fails against a corrupt/invalid database, the
+// whole backup fails loudly (rather than silently falling back to copying
+// the live file while still reporting SQLiteFiles as if a safe snapshot had
+// been taken), and that the captured stderr is part of the error.
+func TestCreateBackup_SQLiteBackupFailureIsHardError(t *testing.T) {
+	requireSQLite3(t)
+	dir := t.TempDir()
+
+	// Magic header only — not a real database, so `.backup` fails against it.
+	sqliteData := make([]byte, 100)
+	copy(sqliteData, []byte("SQLite format 3\000"))
+	os.WriteFile(filepath.Join(dir, "corrupt.db"), sqliteData, 0o644)
+
+	var buf bytes.Buffer
+	stats, err := createBackup(dir, nil, &buf)
+	if err == nil {
+		t.Fatalf("createBackup succeeded (stats: %+v), want error since `.backup` cannot produce a consistent snapshot of a corrupt database", stats)
+	}
+	if !strings.Contains(err.Error(), "not a database") {
+		t.Errorf("error = %q, want it to include the sqlite3 stderr (\"not a database\")", err.Error())
+	}
+}
+
+// TestHandlerBackup_SQLiteBackupFailureLogsStderr drives the same forced
+// failure through the HTTP handler and asserts the captured stderr reaches
+// the server log, and that the response honestly reports failure instead of
+// a 200 with stats implying a safe snapshot was taken.
+func TestHandlerBackup_SQLiteBackupFailureLogsStderr(t *testing.T) {
+	requireSQLite3(t)
+	dir := t.TempDir()
+
+	sqliteData := make([]byte, 100)
+	copy(sqliteData, []byte("SQLite format 3\000"))
+	os.WriteFile(filepath.Join(dir, "corrupt.db"), sqliteData, 0o644)
+
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(origOutput) })
+
+	cfg := &config{BackupPath: dir}
+	rr := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/backup", nil)
+	handleBackup(cfg)(rr, req)
+
+	if rr.Code < 500 || rr.Code >= 600 {
+		t.Fatalf("status = %d, want 5xx", rr.Code)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("error response is not valid JSON: %v (body: %q)", err, rr.Body.String())
+	}
+	if resp["success"] != false {
+		t.Errorf(`response["success"] = %v, want false`, resp["success"])
+	}
+
+	if !strings.Contains(logBuf.String(), "not a database") {
+		t.Errorf("expected sqlite3 stderr to reach the log, got: %q", logBuf.String())
+	}
+}
+
+// TestCreateBackup_SQLitePathWithSingleQuote exercises a source tree whose
+// SQLite file lives under a path containing a single quote. Before the fix,
+// the `.backup 'DEST'` argument couldn't represent a destination containing
+// a quote (sqlite3's dot-command tokenizer has no working escape for it),
+// so `.backup` would fail to open the malformed path.
+func TestCreateBackup_SQLitePathWithSingleQuote(t *testing.T) {
+	sqlite3Path := requireSQLite3(t)
+	dir := t.TempDir()
+
+	subdir := filepath.Join(dir, "app's data")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dbPath := filepath.Join(subdir, "app's.db")
+	writeRealSQLiteDB(t, sqlite3Path, dbPath)
+
+	var buf bytes.Buffer
+	stats, err := createBackup(dir, nil, &buf)
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if stats.SQLiteFiles != 1 {
+		t.Errorf("SQLiteFiles = %d, want 1", stats.SQLiteFiles)
+	}
+	if stats.SQLiteFallback != 0 {
+		t.Errorf("SQLiteFallback = %d, want 0", stats.SQLiteFallback)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("zip.NewReader: %v", err)
+	}
+	wantName := "app's data/app's.db"
+	var found *zip.File
+	for _, f := range zr.File {
+		if f.Name == wantName {
+			found = f
+		}
+	}
+	if found == nil {
+		var names []string
+		for _, f := range zr.File {
+			names = append(names, f.Name)
+		}
+		t.Fatalf("ZIP missing entry %q (have: %v)", wantName, names)
+	}
+
+	rc, err := found.Open()
+	if err != nil {
+		t.Fatalf("open zip entry: %v", err)
+	}
+	data, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(data[:len(sqliteMagic)], sqliteMagic) {
+		t.Errorf("zip entry %q does not look like a SQLite backup", wantName)
 	}
 }
 

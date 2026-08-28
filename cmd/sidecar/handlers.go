@@ -94,8 +94,8 @@ func handleBackup(cfg *config) http.HandlerFunc {
 			return
 		}
 
-		log.Printf("[sidecar] Backup complete: %d files (%d SQLite), %d bytes",
-			stats.TotalFiles, stats.SQLiteFiles, stats.TotalBytes)
+		log.Printf("[sidecar] Backup complete: %d files (%d SQLite, %d via direct-copy fallback), %d bytes",
+			stats.TotalFiles, stats.SQLiteFiles, stats.SQLiteFallback, stats.TotalBytes)
 	}
 }
 
