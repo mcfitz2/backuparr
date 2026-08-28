@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,6 +74,20 @@ func (c *ProwlarrClient) Name() string {
 
 // Backup triggers a backup and returns the backup file content
 func (c *ProwlarrClient) Backup(ctx context.Context) (*backup.BackupResult, io.ReadCloser, error) {
+	// Snapshot the newest known backup before triggering. The trigger+poll
+	// flow can report completion before the new backup file actually shows
+	// up in the list, so we need something to compare against afterward.
+	existingBackups, err := c.getBackupFiles(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get backup files: %w", err)
+	}
+	hasPreviousBackup := len(existingBackups) > 0
+	var previousNewest time.Time
+	if hasPreviousBackup {
+		sortBackupsByTimeDesc(existingBackups)
+		previousNewest = derefTime(existingBackups[0].Time)
+	}
+
 	// Trigger the backup command and wait for completion
 	if err := c.runBackupCommand(ctx); err != nil {
 		return nil, nil, fmt.Errorf("backup command failed: %w", err)
@@ -88,8 +103,16 @@ func (c *ProwlarrClient) Backup(ctx context.Context) (*backup.BackupResult, io.R
 		return nil, nil, fmt.Errorf("no backup files found after backup command")
 	}
 
-	// Get the most recent backup (first in the list)
+	// Sort newest-first rather than trusting the API's ordering.
+	sortBackupsByTimeDesc(backups)
 	latest := backups[0]
+
+	// If there was already at least one backup before we triggered, the
+	// selected backup must be strictly newer than it. Otherwise we'd upload
+	// and timestamp a stale (pre-existing) backup as if it were fresh.
+	if hasPreviousBackup && !derefTime(latest.Time).After(previousNewest) {
+		return nil, nil, fmt.Errorf("%s: no fresh backup found after triggering backup: latest backup time %s is not after previous newest %s", c.Name(), derefTime(latest.Time), previousNewest)
+	}
 
 	// Download the backup file
 	reader, err := c.downloadBackup(ctx, latest.Path, derefInt64(latest.Size))
@@ -501,4 +524,13 @@ func derefTime(t *time.Time) time.Time {
 		return time.Time{}
 	}
 	return *t
+}
+
+// sortBackupsByTimeDesc orders backups newest-first by Time, rather than
+// trusting the order the API returns. A nil Time is treated as the oldest
+// possible value, so such entries sort last and are never picked as newest.
+func sortBackupsByTimeDesc(backups []BackupResource) {
+	sort.SliceStable(backups, func(i, j int) bool {
+		return derefTime(backups[i].Time).After(derefTime(backups[j].Time))
+	})
 }

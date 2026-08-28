@@ -103,8 +103,15 @@ type mockArrServer struct {
 	commandGetCalls  int
 
 	// GET /api/v3/system/backup
-	backups       []BackupResource
-	backupsStatus int
+	// The client calls this endpoint twice: once before triggering the
+	// backup command (to snapshot the newest existing backup) and once
+	// after. The first call returns preTriggerBackups (default: none, i.e.
+	// "no backups exist yet" so the freshness check never blocks a test that
+	// doesn't care about it); every call after that returns backups.
+	backups           []BackupResource
+	preTriggerBackups []BackupResource
+	backupsStatus     int
+	backupsCallCount  int
 
 	// GET /api/v3/system/status
 	dbType           *DatabaseType
@@ -118,6 +125,7 @@ type mockArrServer struct {
 	downloadData        map[string][]byte
 	downloadContentType string
 	downloadStatus      int
+	downloadCalls       int
 
 	// POST /login
 	loginValidUsername string
@@ -254,8 +262,13 @@ func (m *mockArrServer) handleBackups(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"error":"backups failed"}`))
 		return
 	}
+	m.backupsCallCount++
+	list := m.backups
+	if m.backupsCallCount == 1 {
+		list = m.preTriggerBackups
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(m.backups)
+	json.NewEncoder(w).Encode(list)
 }
 
 func (m *mockArrServer) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +303,7 @@ func (m *mockArrServer) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if !m.checkAPIKey(w, r) {
 		return
 	}
+	m.downloadCalls++
 	data, ok := m.downloadData[r.URL.Path]
 	if !ok {
 		http.NotFound(w, r)
@@ -443,10 +457,13 @@ func TestBackup_Success(t *testing.T) {
 	}
 }
 
-// The client takes backups[0] as "the latest" without sorting by Time.
-// This pins that (buggy-looking) selection behavior; see the linked
-// "no sort on backups[0]" issue — do not fix here.
-func TestBackup_SelectsFirstEntryRegardlessOfRecency(t *testing.T) {
+// The client sorts the returned backup list by Time (descending) rather than
+// trusting the API's order, so an out-of-order list still yields the actual
+// newest entry, not backups[0]. The pre-trigger snapshot is left at its
+// default (empty), so this is a first-ever-backup scenario and the freshness
+// check (see TestBackup_NoNewBackupAfterCommand_Fails) doesn't interfere
+// with isolating the sort behavior.
+func TestBackup_SelectsNewestEntry(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	older := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	newer := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -467,8 +484,91 @@ func TestBackup_SelectsFirstEntryRegardlessOfRecency(t *testing.T) {
 	}
 	defer reader.Close()
 
-	if result.Name != "old.zip" {
-		t.Errorf("result.Name = %q, want %q (index-0 selection, not most recent)", result.Name, "old.zip")
+	if result.Name != "new.zip" {
+		t.Errorf("result.Name = %q, want %q (newest by Time, not index 0)", result.Name, "new.zip")
+	}
+}
+
+// If the trigger+poll flow reports completion but the backup list is
+// unchanged (no new backup actually appeared), Backup() must fail rather
+// than re-upload and re-timestamp the pre-existing backup as fresh.
+func TestBackup_NoNewBackupAfterCommand_Fails(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	existing := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	m.backups = []BackupResource{
+		{Name: strPtr("backup.zip"), Path: strPtr("/backup/backup.zip"), Size: int64Ptr(3), Time: &existing},
+	}
+	m.preTriggerBackups = m.backups // list is identical before and after the command
+
+	c, err := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	if err != nil {
+		t.Fatalf("NewSonarrClient: %v", err)
+	}
+	_, _, err = c.Backup(context.Background())
+	if err == nil {
+		t.Fatal("Backup() should fail when no newer backup appears after the command completes")
+	}
+	if !strings.Contains(err.Error(), "no fresh backup found") {
+		t.Errorf("error = %q, want mention of no fresh backup found", err.Error())
+	}
+	if m.downloadCalls != 0 {
+		t.Errorf("downloadCalls = %d, want 0 (stale backup must not be uploaded)", m.downloadCalls)
+	}
+}
+
+// The very first backup ever taken has no prior backup to compare against,
+// so an empty pre-trigger list must not block success. This is also the
+// default mock configuration (preTriggerBackups defaults to empty), made
+// explicit here.
+func TestBackup_FirstEverBackup_EmptyPreTriggerList_Succeeds(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	m.preTriggerBackups = []BackupResource{}
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m.backups = []BackupResource{
+		{Name: strPtr("first.zip"), Path: strPtr("/backup/first.zip"), Size: int64Ptr(3), Time: &created},
+	}
+	m.downloadData["/backup/first.zip"] = []byte("new")
+
+	c, err := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	if err != nil {
+		t.Fatalf("NewSonarrClient: %v", err)
+	}
+	result, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() should succeed on the first-ever backup: %v", err)
+	}
+	defer reader.Close()
+	if result.Name != "first.zip" {
+		t.Errorf("result.Name = %q, want %q", result.Name, "first.zip")
+	}
+}
+
+// A backup entry with a nil Time is treated as the oldest possible value by
+// sortBackupsByTimeDesc, so it sorts behind any entry with a real timestamp
+// and is never mistakenly selected as the newest. The pre-trigger snapshot
+// is left empty (default) so the freshness check doesn't interfere with
+// isolating this.
+func TestBackup_NilTimestampEntry_NotSelectedOverTimestamped(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	newer := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	m.backups = []BackupResource{
+		{Name: strPtr("no-time.zip"), Path: strPtr("/backup/no-time.zip"), Size: int64Ptr(3), Time: nil},
+		{Name: strPtr("new.zip"), Path: strPtr("/backup/new.zip"), Size: int64Ptr(3), Time: &newer},
+	}
+	m.downloadData["/backup/no-time.zip"] = []byte("no-time")
+	m.downloadData["/backup/new.zip"] = []byte("new")
+
+	c, err := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	if err != nil {
+		t.Fatalf("NewSonarrClient: %v", err)
+	}
+	result, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() error: %v", err)
+	}
+	defer reader.Close()
+	if result.Name != "new.zip" {
+		t.Errorf("result.Name = %q, want %q (nil-Time entry must not outrank a timestamped one)", result.Name, "new.zip")
 	}
 }
 
