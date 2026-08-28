@@ -136,16 +136,6 @@ func createBackends(configs []config.StorageConfig) ([]storage.Backend, error) {
 	return backends, nil
 }
 
-// appDisplayName returns the effective name for an app config, falling back to
-// the app type when no explicit name is set. Configs can hold several targets
-// of the same type, so the name is what identifies a target in logs.
-func appDisplayName(cfg config.AppConfig) string {
-	if cfg.Name != "" {
-		return cfg.Name
-	}
-	return cfg.AppType
-}
-
 func toStorageRetention(r config.RetentionPolicy) storage.RetentionPolicy {
 	return storage.RetentionPolicy{
 		KeepLast:    r.KeepLast,
@@ -295,7 +285,7 @@ func runBackupAll() {
 	var failed []string
 
 	for _, appCfg := range cfg.AppConfigs {
-		name := appDisplayName(appCfg)
+		name := config.AppConfigName(appCfg)
 
 		client, err := createClient(appCfg)
 		if err != nil {
@@ -462,13 +452,13 @@ func runListCLI() {
 // It matches against the Name field first, then falls back to AppType.
 func findAppConfig(cfg config.BackuparrConfig, appName string) (config.AppConfig, error) {
 	for _, ac := range cfg.AppConfigs {
-		if appDisplayName(ac) == appName {
+		if config.AppConfigName(ac) == appName {
 			return ac, nil
 		}
 	}
 	var names []string
 	for _, ac := range cfg.AppConfigs {
-		names = append(names, appDisplayName(ac))
+		names = append(names, config.AppConfigName(ac))
 	}
 	return config.AppConfig{}, fmt.Errorf("app %q not found in config (available: %v)", appName, names)
 }

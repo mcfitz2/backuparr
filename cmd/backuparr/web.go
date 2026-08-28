@@ -370,7 +370,7 @@ func (s *webServer) executeBackupJob(id string) {
 	jobLogs := make([]string, 0, 32)
 
 	for _, appCfg := range s.cfg.AppConfigs {
-		name := appDisplayName(appCfg)
+		name := config.AppConfigName(appCfg)
 		if targetApp != "" && name != targetApp {
 			continue
 		}

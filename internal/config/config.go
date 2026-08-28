@@ -101,20 +101,11 @@ func Parse(path string) (BackuparrConfig, error) {
 		if app.Retention.isZero() {
 			return BackuparrConfig{}, fmt.Errorf(
 				"app %q: retention policy is empty (no keepLast/keepHourly/keepDaily/keepWeekly/keepMonthly/keepYearly set); "+
-					"this would delete every existing backup on the next run, so refusing to load", appLabel(app))
+					"this would delete every existing backup on the next run, so refusing to load", AppConfigName(app))
 		}
 	}
 
 	return cfg, nil
-}
-
-// appLabel returns the display name for an app config for use in error
-// messages, falling back to its type when no name is set.
-func appLabel(app AppConfig) string {
-	if app.Name != "" {
-		return app.Name
-	}
-	return app.AppType
 }
 
 // Path resolves the config file path from (in order of priority):
@@ -140,4 +131,13 @@ func StorageConfigName(sc StorageConfig) string {
 		return sc.Name
 	}
 	return sc.Type
+}
+
+// AppConfigName returns the effective name for an app config entry.
+// If a custom name is set it takes precedence; otherwise the app type is used.
+func AppConfigName(app AppConfig) string {
+	if app.Name != "" {
+		return app.Name
+	}
+	return app.AppType
 }

@@ -130,6 +130,25 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestAppConfigName(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AppConfig
+		want string
+	}{
+		{"explicit name wins", AppConfig{Name: "sonarr-4k", AppType: "sonarr"}, "sonarr-4k"},
+		{"falls back to app type", AppConfig{AppType: "radarr"}, "radarr"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AppConfigName(tt.cfg); got != tt.want {
+				t.Errorf("AppConfigName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParse_MissingFile(t *testing.T) {
 	_, err := Parse(filepath.Join(t.TempDir(), "nope.yml"))
 	if err == nil {
