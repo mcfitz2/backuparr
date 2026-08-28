@@ -2,14 +2,30 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// fakeNetError simulates errors returned by the real net/http transport
+// (e.g. *net.OpError, the unexported httpError behind "TLS handshake
+// timeout", *net.DNSError) that carry Timeout()/Temporary() but no
+// exported sentinel to compare against with errors.Is.
+type fakeNetError struct {
+	msg       string
+	timeout   bool
+	temporary bool
+}
+
+func (e *fakeNetError) Error() string   { return e.msg }
+func (e *fakeNetError) Timeout() bool   { return e.timeout }
+func (e *fakeNetError) Temporary() bool { return e.temporary }
 
 // mockTransport is a test RoundTripper that returns configurable responses.
 type mockTransport struct {
@@ -65,8 +81,8 @@ func TestRetryTransport_SuccessNoRetry(t *testing.T) {
 func TestRetryTransport_RetriesOnEOF(t *testing.T) {
 	mock := &mockTransport{
 		responses: []mockResponse{
-			{err: fmt.Errorf("unexpected EOF")},
-			{err: fmt.Errorf("unexpected EOF")},
+			{err: fmt.Errorf("read tcp 10.0.0.1:80: %w", io.ErrUnexpectedEOF)},
+			{err: fmt.Errorf("read tcp 10.0.0.1:80: %w", io.ErrUnexpectedEOF)},
 			{status: 200, body: "ok"},
 		},
 	}
@@ -90,7 +106,7 @@ func TestRetryTransport_RetriesOnEOF(t *testing.T) {
 func TestRetryTransport_RetriesOnTimeout(t *testing.T) {
 	mock := &mockTransport{
 		responses: []mockResponse{
-			{err: fmt.Errorf("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")},
+			{err: &fakeNetError{msg: "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", timeout: true}},
 			{status: 200, body: "ok"},
 		},
 	}
@@ -114,7 +130,7 @@ func TestRetryTransport_RetriesOnTimeout(t *testing.T) {
 func TestRetryTransport_RetriesOnConnectionReset(t *testing.T) {
 	mock := &mockTransport{
 		responses: []mockResponse{
-			{err: fmt.Errorf("read tcp: connection reset by peer")},
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
 			{status: 200, body: "ok"},
 		},
 	}
@@ -207,10 +223,10 @@ func TestRetryTransport_NoRetryOnNonTransientError(t *testing.T) {
 func TestRetryTransport_ExhaustsRetries(t *testing.T) {
 	mock := &mockTransport{
 		responses: []mockResponse{
-			{err: fmt.Errorf("unexpected EOF")},
-			{err: fmt.Errorf("unexpected EOF")},
-			{err: fmt.Errorf("unexpected EOF")},
-			{err: fmt.Errorf("unexpected EOF")},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
 		},
 	}
 
@@ -256,11 +272,14 @@ func TestRetryTransport_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+// TestRetryTransport_PreservesRequestBody covers a POST built with
+// strings.NewReader, for which http.NewRequest auto-populates GetBody —
+// this is the caller-opt-in path, so the request is expected to retry.
 func TestRetryTransport_PreservesRequestBody(t *testing.T) {
 	var bodies []string
 	mock := &mockTransport{
 		responses: []mockResponse{
-			{err: fmt.Errorf("connection reset by peer")},
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
 			{status: 200, body: "ok"},
 		},
 	}
@@ -271,6 +290,9 @@ func TestRetryTransport_PreservesRequestBody(t *testing.T) {
 	body := `{"command":"Backup"}`
 	req, _ := http.NewRequest("POST", "http://example.com", strings.NewReader(body))
 	req.ContentLength = int64(len(body))
+	if req.GetBody == nil {
+		t.Fatal("expected http.NewRequest to auto-populate GetBody for a strings.Reader body")
+	}
 
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
@@ -316,9 +338,9 @@ func TestRetryTransport_ExponentialBackoff(t *testing.T) {
 	var timestamps []time.Time
 	mock := &mockTransport{
 		responses: []mockResponse{
-			{err: fmt.Errorf("unexpected EOF")},
-			{err: fmt.Errorf("unexpected EOF")},
-			{err: fmt.Errorf("unexpected EOF")},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
+			{err: fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF)},
 			{status: 200, body: "ok"},
 		},
 	}
@@ -350,30 +372,35 @@ func TestRetryTransport_ExponentialBackoff(t *testing.T) {
 
 func TestIsRetryableError(t *testing.T) {
 	tests := []struct {
+		name      string
 		err       error
 		retryable bool
 	}{
-		{fmt.Errorf("unexpected EOF"), true},
-		{fmt.Errorf("read tcp: connection reset by peer"), true},
-		{fmt.Errorf("dial tcp: connection refused"), true},
-		{fmt.Errorf("write tcp: broken pipe"), true},
-		{fmt.Errorf("context deadline exceeded"), true},
-		{fmt.Errorf("TLS handshake timeout"), true},
-		{fmt.Errorf("net/http: request canceled while waiting for connection (Client.Timeout exceeded)"), true},
-		{fmt.Errorf("http: server closed idle connection"), true},
-		{fmt.Errorf("unknown scheme: ftp"), false},
-		{fmt.Errorf("invalid URL"), false},
-		{nil, false},
+		{"bare io.EOF", io.EOF, true},
+		{"wrapped unexpected EOF", fmt.Errorf("read tcp: %w", io.ErrUnexpectedEOF), true},
+		{"wrapped connection reset", fmt.Errorf("read tcp: %w", syscall.ECONNRESET), true},
+		{"wrapped connection refused", fmt.Errorf("dial tcp: %w", syscall.ECONNREFUSED), true},
+		{"wrapped broken pipe", fmt.Errorf("write tcp: %w", syscall.EPIPE), true},
+		{"context deadline exceeded", context.DeadlineExceeded, true},
+		{"wrapped context deadline exceeded", fmt.Errorf("request failed: %w", context.DeadlineExceeded), true},
+		{"net.Error timeout (e.g. TLS handshake timeout)", &fakeNetError{msg: "net/http: TLS handshake timeout", timeout: true}, true},
+		{"net.Error temporary (e.g. DNS failure)", &fakeNetError{msg: "lookup host: temporary failure in name resolution", temporary: true}, true},
+		{"server closed idle connection", errors.New("http: server closed idle connection"), true},
+		// These used to be misclassified by naive substring matching on
+		// err.Error(); they are plain errors carrying none of the
+		// structural signals above, so they must not be retried.
+		{"unrelated error containing 'eof' substring", fmt.Errorf("payload contained invalid geofence data"), false},
+		{"unrelated error containing 'timeout' substring", errors.New("request timeout budget exceeded in config"), false},
+		{"unknown scheme", fmt.Errorf("unknown scheme: ftp"), false},
+		{"invalid URL", fmt.Errorf("invalid URL"), false},
+		{"nil", nil, false},
 	}
 	for _, tt := range tests {
-		got := isRetryableError(tt.err)
-		errStr := "<nil>"
-		if tt.err != nil {
-			errStr = tt.err.Error()
-		}
-		if got != tt.retryable {
-			t.Errorf("isRetryableError(%q) = %v, want %v", errStr, got, tt.retryable)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableError(tt.err); got != tt.retryable {
+				t.Errorf("isRetryableError(%v) = %v, want %v", tt.err, got, tt.retryable)
+			}
+		})
 	}
 }
 
@@ -459,6 +486,120 @@ func TestRetryTransport_ExhaustedRetryBodyTruncated(t *testing.T) {
 	}
 	if len(got) != maxBufferedErrorBody {
 		t.Errorf("expected buffered body to be truncated to %d bytes, got %d", maxBufferedErrorBody, len(got))
+	}
+}
+
+func TestRetryTransport_PostNotRetriedByDefault(t *testing.T) {
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{status: 200, body: "ok"},
+		},
+	}
+
+	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+	body := `{"name":"Backup"}`
+	// io.NopCloser hides the concrete *strings.Reader type from
+	// http.NewRequest so it does NOT auto-populate GetBody, simulating a
+	// caller that hasn't opted into replay.
+	req, _ := http.NewRequest(http.MethodPost, "http://example.com", io.NopCloser(strings.NewReader(body)))
+	if req.GetBody != nil {
+		t.Fatal("test setup invalid: expected GetBody to be nil")
+	}
+
+	_, err := rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected the single attempt's error to be returned, got nil")
+	}
+	if mock.calls.Load() != 1 {
+		t.Errorf("expected exactly 1 attempt for a POST without GetBody, got %d", mock.calls.Load())
+	}
+}
+
+func TestRetryTransport_PostRetriesWhenGetBodySet(t *testing.T) {
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{status: 200, body: "ok"},
+		},
+	}
+
+	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+	body := `{"name":"Backup"}`
+	// strings.NewReader is one of the reader types http.NewRequest
+	// recognizes and auto-populates GetBody for, which is how a caller
+	// opts a POST into safe replay.
+	req, _ := http.NewRequest(http.MethodPost, "http://example.com", strings.NewReader(body))
+	if req.GetBody == nil {
+		t.Fatal("test setup invalid: expected GetBody to be set")
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if mock.calls.Load() != 3 {
+		t.Errorf("expected 3 attempts for a POST with GetBody set, got %d", mock.calls.Load())
+	}
+}
+
+func TestRetryTransport_GetStillRetriesUpToMaxRetries(t *testing.T) {
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{status: 200, body: "ok"},
+		},
+	}
+
+	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+	req, _ := http.NewRequest(http.MethodGet, "http://example.com", nil)
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if mock.calls.Load() != 4 {
+		t.Errorf("expected 1 initial + 3 retries = 4 attempts for GET, got %d", mock.calls.Load())
+	}
+}
+
+func TestRetryTransport_OversizedBodyNotBufferedForRetry(t *testing.T) {
+	var bodies []string
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{status: 200, body: "ok"},
+		},
+	}
+	captureMock := &bodyCapturingTransport{inner: mock, bodies: &bodies}
+
+	rt := &RetryTransport{Base: captureMock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+	bigBody := strings.Repeat("x", maxBufferedRequestBody+1024)
+	// PUT is a safe method, but the body exceeds maxBufferedRequestBody and
+	// carries no GetBody (io.NopCloser hides the reader's concrete type),
+	// so it must fall through to a single non-retried attempt instead of
+	// being read entirely into memory.
+	req, _ := http.NewRequest(http.MethodPut, "http://example.com", io.NopCloser(strings.NewReader(bigBody)))
+
+	_, err := rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected the single attempt's error to be returned, got nil")
+	}
+	if mock.calls.Load() != 1 {
+		t.Errorf("expected exactly 1 attempt for an oversized body, got %d", mock.calls.Load())
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("expected the transport to see exactly 1 request body, got %d", len(bodies))
+	}
+	if len(bodies[0]) != len(bigBody) {
+		t.Errorf("expected the full oversized body (%d bytes) to reach the transport intact, got %d bytes", len(bigBody), len(bodies[0]))
 	}
 }
 
