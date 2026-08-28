@@ -20,4 +20,12 @@ RUN apt-get update && \
 COPY --from=builder /backuparr /usr/local/bin/backuparr
 
 RUN mkdir -p /config
+
+# Fixed UID/GID so operators can pre-chown mounted volumes (e.g. /config,
+# storage targets) to a known, stable ID across image rebuilds.
+RUN groupadd -g 10001 backuparr && \
+    useradd -u 10001 -g backuparr -d /nonexistent -s /usr/sbin/nologin backuparr && \
+    chown -R backuparr:backuparr /config
+
+USER backuparr
 ENTRYPOINT ["backuparr"]
