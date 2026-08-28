@@ -21,6 +21,12 @@ type RetryTransport struct {
 	BaseDelay time.Duration
 }
 
+// maxBufferedErrorBody caps how much of a retryable error response body is
+// buffered for return to the caller after retries are exhausted. This bounds
+// memory use if a server sends an unexpectedly large error page; anything
+// beyond this limit is discarded.
+const maxBufferedErrorBody = 64 * 1024 // 64KB
+
 // NewRetryTransport creates a RetryTransport with sensible defaults:
 // 3 retries with 2s base delay (2s, 4s, 8s backoff).
 // If base is nil, http.DefaultTransport is used.
@@ -98,12 +104,15 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 				return nil, err
 			}
 		} else {
-			// Retryable HTTP status — drain body and save for potential return
-			lastResp = resp
+			// Retryable HTTP status — drain the body (bounded), then restore
+			// it as a fresh reader so the response stays usable if we end up
+			// returning it after exhausting retries.
 			if resp.Body != nil {
-				io.Copy(io.Discard, resp.Body)
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBufferedErrorBody))
 				resp.Body.Close()
+				resp.Body = io.NopCloser(bytes.NewReader(body))
 			}
+			lastResp = resp
 		}
 
 		// Log and wait before retrying
