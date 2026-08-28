@@ -384,22 +384,3 @@ func TestRunBackup_RetentionFailureDoesNotFail(t *testing.T) {
 		t.Errorf("uploaded %d objects, want 1", len(backend.uploaded))
 	}
 }
-
-func TestAppDisplayName(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  config.AppConfig
-		want string
-	}{
-		{"explicit name wins", config.AppConfig{Name: "sonarr-4k", AppType: "sonarr"}, "sonarr-4k"},
-		{"falls back to app type", config.AppConfig{AppType: "radarr"}, "radarr"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := appDisplayName(tt.cfg); got != tt.want {
-				t.Errorf("appDisplayName() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

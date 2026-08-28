@@ -1,9 +1,39 @@
 package storage
 
 import (
+	"context"
+	"errors"
+	"io"
 	"testing"
 	"time"
 )
+
+// fakeBackend is a minimal in-memory Backend for exercising ApplyRetention.
+type fakeBackend struct {
+	backups []BackupMetadata
+	deleted []string
+}
+
+func (f *fakeBackend) Type() string        { return "fake" }
+func (f *fakeBackend) Name() string        { return "fake" }
+func (f *fakeBackend) SetName(name string) {}
+
+func (f *fakeBackend) Upload(ctx context.Context, appName, fileName string, data io.Reader, size int64) (*BackupMetadata, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (f *fakeBackend) Download(ctx context.Context, key string) (io.ReadCloser, *BackupMetadata, error) {
+	return nil, nil, errors.New("not implemented")
+}
+
+func (f *fakeBackend) List(ctx context.Context, appName string) ([]BackupMetadata, error) {
+	return f.backups, nil
+}
+
+func (f *fakeBackend) Delete(ctx context.Context, key string) error {
+	f.deleted = append(f.deleted, key)
+	return nil
+}
 
 func TestFormatBackupName(t *testing.T) {
 	ts := time.Date(2026, 2, 6, 12, 30, 45, 0, time.UTC)
@@ -223,5 +253,76 @@ func TestSelectBackupsToKeep_KeepLastExceedsTotal(t *testing.T) {
 	keep := selectBackupsToKeep(backups, policy)
 	if len(keep) != 2 {
 		t.Errorf("expected 2 kept, got %d", len(keep))
+	}
+}
+
+// TestApplyRetention_ZeroPolicyDeletesNothing is the regression test for
+// issue #9: a zero-value policy must not wipe out every existing backup.
+func TestApplyRetention_ZeroPolicyDeletesNothing(t *testing.T) {
+	backend := &fakeBackend{
+		backups: []BackupMetadata{
+			makeBackup("b1", time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)),
+			makeBackup("b2", time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)),
+		},
+	}
+	deleted, err := ApplyRetention(context.Background(), backend, "test", RetentionPolicy{})
+	if err == nil {
+		t.Fatal("ApplyRetention() = nil error, want error for a zero-value policy")
+	}
+	if deleted != 0 {
+		t.Errorf("ApplyRetention() deleted count = %d, want 0", deleted)
+	}
+	if len(backend.deleted) != 0 {
+		t.Errorf("backend.deleted = %v, want empty", backend.deleted)
+	}
+}
+
+// TestApplyRetention_NormalPolicyDeletesOnlyPruned asserts on backend.deleted
+// directly, closing the test blind spot named in issue #9 where the field was
+// appended to but never checked.
+func TestApplyRetention_NormalPolicyDeletesOnlyPruned(t *testing.T) {
+	backend := &fakeBackend{
+		backups: []BackupMetadata{
+			makeBackup("b1", time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)),
+			makeBackup("b2", time.Date(2026, 6, 14, 12, 0, 0, 0, time.UTC)),
+			makeBackup("b3", time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)),
+		},
+	}
+	deleted, err := ApplyRetention(context.Background(), backend, "test", RetentionPolicy{KeepLast: 1})
+	if err != nil {
+		t.Fatalf("ApplyRetention() error = %v, want nil", err)
+	}
+	if deleted != 2 {
+		t.Errorf("ApplyRetention() deleted count = %d, want 2", deleted)
+	}
+	want := map[string]bool{"b1": true, "b2": true}
+	if len(backend.deleted) != len(want) {
+		t.Fatalf("backend.deleted = %v, want keys of %v", backend.deleted, want)
+	}
+	for _, key := range backend.deleted {
+		if !want[key] {
+			t.Errorf("backend.deleted contains unexpected key %q", key)
+		}
+	}
+	for _, key := range backend.deleted {
+		if key == "b3" {
+			t.Errorf("backend.deleted must not contain kept backup %q", key)
+		}
+	}
+}
+
+// TestApplyRetention_NoBackups asserts the no-op path still returns cleanly
+// and deletes nothing when the backend has no backups for the app.
+func TestApplyRetention_NoBackups(t *testing.T) {
+	backend := &fakeBackend{}
+	deleted, err := ApplyRetention(context.Background(), backend, "test", RetentionPolicy{})
+	if err != nil {
+		t.Fatalf("ApplyRetention() error = %v, want nil", err)
+	}
+	if deleted != 0 {
+		t.Errorf("ApplyRetention() deleted count = %d, want 0", deleted)
+	}
+	if len(backend.deleted) != 0 {
+		t.Errorf("backend.deleted = %v, want empty", backend.deleted)
 	}
 }

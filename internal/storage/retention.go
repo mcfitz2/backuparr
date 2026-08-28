@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"time"
@@ -30,6 +31,9 @@ func ApplyRetention(ctx context.Context, backend Backend, appName string, policy
 	}
 
 	toKeep := selectBackupsToKeep(backups, policy)
+	if len(toKeep) == 0 {
+		return 0, fmt.Errorf("[%s] retention policy keeps none of %d existing backups; refusing to delete all of them", appName, len(backups))
+	}
 
 	deleted := 0
 	for _, b := range backups {
