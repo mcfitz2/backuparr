@@ -1,16 +1,19 @@
-package prowlarr
+package sonarr
 
 import (
 	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"backuparr/internal/backup"
 )
 
 // ---- small helper unit tests ----
@@ -46,25 +49,24 @@ func TestDerefTime(t *testing.T) {
 }
 
 func TestName(t *testing.T) {
-	c, err := NewProwlarrClient("http://localhost:9696", "key", "", "")
+	c, err := NewSonarrClient("http://localhost:8989", "key", "", "", nil)
 	if err != nil {
-		t.Fatalf("NewProwlarrClient: %v", err)
+		t.Fatalf("NewSonarrClient: %v", err)
 	}
-	if got := c.Name(); got != "prowlarr" {
-		t.Errorf("Name() = %q, want %q", got, "prowlarr")
+	if got := c.Name(); got != "sonarr" {
+		t.Errorf("Name() = %q, want %q", got, "sonarr")
 	}
 }
 
-// NewProwlarrClient must wire the credential fields onto the client exactly
-// as given, since every downstream request (generated-client calls via
+// NewSonarrClient must wire the credential fields onto the client exactly as
+// given, since every downstream request (generated-client calls via
 // WithRequestEditorFn, and the manual downloadBackup/Restore-upload
 // requests) reads them straight off the struct. This pins that wiring so a
 // future refactor that merges the *arr clients can't silently drop a field.
-// (Unlike sonarr/radarr, ProwlarrClient has no pgOverride field.)
-func TestNewProwlarrClient_StoresCredentials(t *testing.T) {
-	c, err := NewProwlarrClient("http://localhost:9696", "my-api-key", "my-user", "test-password-not-real")
+func TestNewSonarrClient_StoresCredentials(t *testing.T) {
+	c, err := NewSonarrClient("http://localhost:8989", "my-api-key", "my-user", "test-password-not-real", nil)
 	if err != nil {
-		t.Fatalf("NewProwlarrClient: %v", err)
+		t.Fatalf("NewSonarrClient: %v", err)
 	}
 	if c.apiKey != "my-api-key" {
 		t.Errorf("apiKey = %q, want %q", c.apiKey, "my-api-key")
@@ -75,36 +77,40 @@ func TestNewProwlarrClient_StoresCredentials(t *testing.T) {
 	if c.password != "test-password-not-real" {
 		t.Errorf("password = %q, want %q", c.password, "test-password-not-real")
 	}
-	if c.baseURL != "http://localhost:9696" {
-		t.Errorf("baseURL = %q, want %q", c.baseURL, "http://localhost:9696")
+	if c.baseURL != "http://localhost:8989" {
+		t.Errorf("baseURL = %q, want %q", c.baseURL, "http://localhost:8989")
 	}
 }
 
 // ---- mock server ----
 
-// mockArrServer is a configurable stand-in for the Prowlarr API surface that
+// mockArrServer is a configurable stand-in for the Sonarr API surface that
 // client.go actually talks to. Every field has a working default; tests
 // mutate only what they need to exercise before invoking client methods.
 type mockArrServer struct {
 	srv    *httptest.Server
 	apiKey string
 
-	// POST /api/v1/command
+	// POST /api/v3/command
 	commandPostStatus int
 	commandID         int32
 	commandNoID       bool
 
-	// GET /api/v1/command/{id}
+	// GET /api/v3/command/{id}
 	commandStatuses  []CommandStatus // sequence of statuses returned; last one repeats
 	commandStatusMsg string
 	commandGetStatus int
 	commandGetCalls  int
 
-	// GET /api/v1/system/backup
+	// GET /api/v3/system/backup
 	backups       []BackupResource
 	backupsStatus int
 
-	// GET /api/v1/config/host
+	// GET /api/v3/system/status
+	dbType           *DatabaseType
+	systemStatusCode int
+
+	// GET /api/v3/config/host
 	authMethod       *AuthenticationType
 	hostConfigStatus int
 
@@ -119,19 +125,19 @@ type mockArrServer struct {
 	loginStatus        int
 	loginSetCookie     bool
 
-	// POST /api/v1/system/backup/restore/upload
+	// POST /api/v3/system/backup/restore/upload
 	restoreUploadStatus    int
 	restoreRestartRequired bool
 	restoreUploadedData    []byte
 	restoreContentType     string
 
-	// POST /api/v1/system/restart
+	// POST /api/v3/system/restart
 	restartStatus int
 }
 
 func newMockArrServer(t *testing.T, apiKey string) *mockArrServer {
 	t.Helper()
-	completed := Completed
+	completed := CommandStatusCompleted
 	m := &mockArrServer{
 		apiKey:            apiKey,
 		commandPostStatus: http.StatusOK,
@@ -147,6 +153,7 @@ func newMockArrServer(t *testing.T, apiKey string) *mockArrServer {
 			},
 		},
 		backupsStatus:       http.StatusOK,
+		systemStatusCode:    http.StatusOK,
 		hostConfigStatus:    http.StatusOK,
 		downloadData:        map[string][]byte{"/backup/backup.zip": []byte("zip-bytes-here-000")},
 		downloadContentType: "application/zip",
@@ -158,12 +165,13 @@ func newMockArrServer(t *testing.T, apiKey string) *mockArrServer {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/command", m.handleCommandPost)
-	mux.HandleFunc("/api/v1/command/", m.handleCommandGet)
-	mux.HandleFunc("/api/v1/system/backup", m.handleBackups)
-	mux.HandleFunc("/api/v1/config/host", m.handleHostConfig)
-	mux.HandleFunc("/api/v1/system/backup/restore/upload", m.handleRestoreUpload)
-	mux.HandleFunc("/api/v1/system/restart", m.handleRestart)
+	mux.HandleFunc("/api/v3/command", m.handleCommandPost)
+	mux.HandleFunc("/api/v3/command/", m.handleCommandGet)
+	mux.HandleFunc("/api/v3/system/backup", m.handleBackups)
+	mux.HandleFunc("/api/v3/system/status", m.handleSystemStatus)
+	mux.HandleFunc("/api/v3/config/host", m.handleHostConfig)
+	mux.HandleFunc("/api/v3/system/backup/restore/upload", m.handleRestoreUpload)
+	mux.HandleFunc("/api/v3/system/restart", m.handleRestart)
 	mux.HandleFunc("/login", m.handleLogin)
 	mux.HandleFunc("/", m.handleDownload)
 
@@ -250,6 +258,20 @@ func (m *mockArrServer) handleBackups(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(m.backups)
 }
 
+func (m *mockArrServer) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
+	if !m.checkAPIKey(w, r) {
+		return
+	}
+	if m.systemStatusCode != 0 && m.systemStatusCode != http.StatusOK {
+		w.WriteHeader(m.systemStatusCode)
+		w.Write([]byte(`{"error":"status failed"}`))
+		return
+	}
+	status := SystemResource{DatabaseType: m.dbType}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
 func (m *mockArrServer) handleHostConfig(w http.ResponseWriter, r *http.Request) {
 	if !m.checkAPIKey(w, r) {
 		return
@@ -299,7 +321,7 @@ func (m *mockArrServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	valid := user == m.loginValidUsername && pass == m.loginValidPassword
 	if valid && m.loginSetCookie {
-		http.SetCookie(w, &http.Cookie{Name: "ProwlarrAuth", Value: "session-token"})
+		http.SetCookie(w, &http.Cookie{Name: "SonarrAuth", Value: "session-token"})
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -356,16 +378,40 @@ func buildZip(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
+// configXML renders a config.xml body with the given postgres fields (blank means omit the value).
+func configXML(host, port, user, password, mainDB, logDB string) string {
+	type cfg struct {
+		XMLName          xml.Name `xml:"Config"`
+		PostgresHost     string   `xml:"PostgresHost"`
+		PostgresPort     string   `xml:"PostgresPort"`
+		PostgresUser     string   `xml:"PostgresUser"`
+		PostgresPassword string   `xml:"PostgresPassword"`
+		PostgresMainDb   string   `xml:"PostgresMainDb"`
+		PostgresLogDb    string   `xml:"PostgresLogDb"`
+	}
+	out, _ := xml.Marshal(cfg{
+		PostgresHost:     host,
+		PostgresPort:     port,
+		PostgresUser:     user,
+		PostgresPassword: password,
+		PostgresMainDb:   mainDB,
+		PostgresLogDb:    logDB,
+	})
+	return string(out)
+}
+
 // ---- Backup(): happy path & selection ----
 
 func TestBackup_Success(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
+	sqlite := DatabaseType("sqLite")
+	m.dbType = &sqlite
 	none := AuthenticationType("none")
 	m.authMethod = &none
 
-	c, err := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, err := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	if err != nil {
-		t.Fatalf("NewProwlarrClient: %v", err)
+		t.Fatalf("NewSonarrClient: %v", err)
 	}
 
 	result, reader, err := c.Backup(context.Background())
@@ -411,9 +457,9 @@ func TestBackup_SelectsFirstEntryRegardlessOfRecency(t *testing.T) {
 	m.downloadData["/backup/old.zip"] = []byte("old")
 	m.downloadData["/backup/new.zip"] = []byte("new")
 
-	c, err := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, err := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	if err != nil {
-		t.Fatalf("NewProwlarrClient: %v", err)
+		t.Fatalf("NewSonarrClient: %v", err)
 	}
 	result, reader, err := c.Backup(context.Background())
 	if err != nil {
@@ -430,7 +476,7 @@ func TestBackup_NoBackupsFound(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.backups = []BackupResource{}
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when no backups are returned")
@@ -444,7 +490,7 @@ func TestBackup_GetBackupFilesAPIError(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.backupsStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when backups list API errors")
@@ -458,7 +504,7 @@ func TestBackup_DownloadPathEmpty(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.backups = []BackupResource{{Name: strPtr("x.zip"), Path: strPtr(""), Size: int64Ptr(0)}}
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when backup path is empty")
@@ -474,7 +520,7 @@ func TestBackup_CommandPostAPIError(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.commandPostStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when the command POST errors")
@@ -488,7 +534,7 @@ func TestBackup_CommandNoID(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.commandNoID = true
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when command response has no ID")
@@ -500,11 +546,11 @@ func TestBackup_CommandNoID(t *testing.T) {
 
 func TestBackup_CommandFailedStatus(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
-	failed := Failed
+	failed := CommandStatusFailed
 	m.commandStatuses = []CommandStatus{failed}
 	m.commandStatusMsg = "disk full"
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when command status is failed")
@@ -516,10 +562,10 @@ func TestBackup_CommandFailedStatus(t *testing.T) {
 
 func TestBackup_CommandCancelledStatus(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
-	cancelled := Cancelled
+	cancelled := CommandStatusCancelled
 	m.commandStatuses = []CommandStatus{cancelled}
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when command is cancelled")
@@ -531,10 +577,10 @@ func TestBackup_CommandCancelledStatus(t *testing.T) {
 
 func TestBackup_CommandAbortedStatus(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
-	aborted := Aborted
+	aborted := CommandStatusAborted
 	m.commandStatuses = []CommandStatus{aborted}
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when command is aborted")
@@ -554,7 +600,7 @@ func TestBackup_CommandGetNonOKStatus_PollsForeverUntilContextCancelled(t *testi
 	m := newMockArrServer(t, "test-api-key")
 	m.commandGetStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_, _, err := c.Backup(ctx)
@@ -577,11 +623,11 @@ func TestBackup_PollingLoopMultipleIterations(t *testing.T) {
 		t.Skip("skipping 2s polling-loop test in short mode")
 	}
 	m := newMockArrServer(t, "test-api-key")
-	queued := Queued
-	completed := Completed
+	queued := CommandStatusQueued
+	completed := CommandStatusCompleted
 	m.commandStatuses = []CommandStatus{queued, completed}
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, reader, err := c.Backup(context.Background())
 	if err != nil {
 		t.Fatalf("Backup() error: %v", err)
@@ -595,10 +641,10 @@ func TestBackup_PollingLoopMultipleIterations(t *testing.T) {
 
 func TestBackup_PollingContextCancellation(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
-	queued := Queued
+	queued := CommandStatusQueued
 	m.commandStatuses = []CommandStatus{queued}
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -611,13 +657,174 @@ func TestBackup_PollingContextCancellation(t *testing.T) {
 	}
 }
 
+// ---- getDatabaseType ----
+
+// A failed database-type lookup is only logged, not surfaced — the backup
+// proceeds as if it were SQLite. This pins that silent-swallow behavior.
+func TestBackup_DatabaseTypeAPIError_ContinuesAsSQLite(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	m.systemStatusCode = http.StatusInternalServerError
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	result, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() should succeed despite database-type lookup failure: %v", err)
+	}
+	defer reader.Close()
+	if result == nil {
+		t.Fatal("expected a non-nil result")
+	}
+}
+
+func TestBackup_DatabaseTypeMissing_DefaultsToSQLite(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	m.dbType = nil // system/status omits databaseType entirely
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	_, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() error: %v", err)
+	}
+	reader.Close()
+}
+
+// ---- postgres branch ----
+
+func TestBackup_PostgresDetected_NoConfigXMLInBackup(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	pg := DatabaseType("postgreSQL")
+	m.dbType = &pg
+	// zip has no config.xml at all
+	m.downloadData["/backup/backup.zip"] = buildZip(t, map[string]string{"other.txt": "hi"})
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	_, _, err := c.Backup(context.Background())
+	if err == nil {
+		t.Fatal("Backup() should fail when config.xml is missing from a postgres backup")
+	}
+	if !strings.Contains(err.Error(), "failed to parse postgres config") {
+		t.Errorf("error = %q, want mention of postgres config parse failure", err.Error())
+	}
+}
+
+// When dbType reports postgreSQL but the backup's config.xml has no postgres
+// settings (and no override is configured), the client silently treats it
+// like a SQLite backup and returns the data unmodified.
+func TestBackup_PostgresDetected_ConfigXMLHasNoPostgresInfo(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	pg := DatabaseType("postgreSQL")
+	m.dbType = &pg
+	zipData := buildZip(t, map[string]string{"config.xml": configXML("", "", "", "", "", "")})
+	m.downloadData["/backup/backup.zip"] = zipData
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	result, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() error: %v", err)
+	}
+	defer reader.Close()
+	got, _ := io.ReadAll(reader)
+	if !bytes.Equal(got, zipData) {
+		t.Error("backup data should be returned unmodified when no postgres info is present")
+	}
+	if result.Size != int64(len(zipData)) {
+		t.Errorf("result.Size = %d, want %d", result.Size, len(zipData))
+	}
+}
+
+// When the backup's config.xml has no postgres info but a pgOverride is
+// configured, the override becomes the full postgres config. With empty
+// MainDB/LogDB, DumpAllDatabases is a no-op (no pg_dump invocation), and the
+// enhanced backup is created with zero dump files added.
+func TestBackup_PostgresDetected_OverrideUsedWhenConfigXMLEmpty(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	pg := DatabaseType("postgreSQL")
+	m.dbType = &pg
+	zipData := buildZip(t, map[string]string{
+		"config.xml": configXML("", "", "", "", "", ""),
+		"other.txt":  "keep-me",
+	})
+	m.downloadData["/backup/backup.zip"] = zipData
+
+	override := &backup.PostgresConfig{Host: "overridehost", Port: "5432"}
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", override)
+	result, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() error: %v", err)
+	}
+	defer reader.Close()
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(got), int64(len(got)))
+	if err != nil {
+		t.Fatalf("resulting backup is not a valid zip: %v", err)
+	}
+	found := false
+	for _, f := range zr.File {
+		if f.Name == "other.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("enhanced backup should still contain the original files")
+	}
+	if result.Size != int64(len(got)) {
+		t.Errorf("result.Size = %d, want %d", result.Size, len(got))
+	}
+}
+
+// When config.xml has postgres settings AND a pgOverride is set, the override
+// fields are merged on top of the parsed config rather than replacing it.
+func TestBackup_PostgresDetected_OverrideMergedOntoConfigXML(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	pg := DatabaseType("postgreSQL")
+	m.dbType = &pg
+	zipData := buildZip(t, map[string]string{
+		"config.xml": configXML("cfghost", "5432", "cfguser", "cfgpass", "", ""),
+	})
+	m.downloadData["/backup/backup.zip"] = zipData
+
+	override := &backup.PostgresConfig{Host: "overridehost"}
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", override)
+	_, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() error: %v", err)
+	}
+	reader.Close()
+}
+
+// With a real MainDB configured, DumpAllDatabases actually shells out to
+// pg_dump. Against an unreachable host this fails fast and the error is
+// wrapped by Backup(), regardless of whether pg_dump is even installed.
+func TestBackup_PostgresDumpFailure(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	pg := DatabaseType("postgreSQL")
+	m.dbType = &pg
+	zipData := buildZip(t, map[string]string{
+		"config.xml": configXML("127.0.0.1", "1", "user", "pass", "maindb", ""),
+	})
+	m.downloadData["/backup/backup.zip"] = zipData
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	_, _, err := c.Backup(context.Background())
+	if err == nil {
+		t.Fatal("Backup() should fail when pg_dump cannot reach the database")
+	}
+	if !strings.Contains(err.Error(), "failed to dump postgres databases") {
+		t.Errorf("error = %q, want mention of postgres dump failure", err.Error())
+	}
+}
+
 // ---- downloadBackup / getAuthMethod ----
 
 func TestBackup_DownloadContentTypeMismatch(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.downloadContentType = "text/html"
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail on unexpected content type")
@@ -631,7 +838,7 @@ func TestBackup_DownloadAPIError(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.downloadStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when download errors")
@@ -645,7 +852,7 @@ func TestBackup_GetAuthMethodAPIError(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.hostConfigStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when auth method lookup errors")
@@ -664,10 +871,11 @@ func TestBackup_AuthMethodBasic_SendsBasicAuth(t *testing.T) {
 	var gotOK bool
 	origDownload := m.downloadData["/backup/backup.zip"]
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/command", m.handleCommandPost)
-	mux.HandleFunc("/api/v1/command/", m.handleCommandGet)
-	mux.HandleFunc("/api/v1/system/backup", m.handleBackups)
-	mux.HandleFunc("/api/v1/config/host", m.handleHostConfig)
+	mux.HandleFunc("/api/v3/command", m.handleCommandPost)
+	mux.HandleFunc("/api/v3/command/", m.handleCommandGet)
+	mux.HandleFunc("/api/v3/system/backup", m.handleBackups)
+	mux.HandleFunc("/api/v3/system/status", m.handleSystemStatus)
+	mux.HandleFunc("/api/v3/config/host", m.handleHostConfig)
 	mux.HandleFunc("/backup/backup.zip", func(w http.ResponseWriter, r *http.Request) {
 		gotUser, gotPass, gotOK = r.BasicAuth()
 		w.Header().Set("Content-Type", "application/zip")
@@ -676,7 +884,7 @@ func TestBackup_AuthMethodBasic_SendsBasicAuth(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c, _ := NewProwlarrClient(srv.URL, "test-api-key", "myuser", "mypass")
+	c, _ := NewSonarrClient(srv.URL, "test-api-key", "myuser", "mypass", nil)
 	_, reader, err := c.Backup(context.Background())
 	if err != nil {
 		t.Fatalf("Backup() error: %v", err)
@@ -698,7 +906,7 @@ func TestBackup_AuthMethodForms_LoginSucceeds(t *testing.T) {
 	m.loginValidUsername = "admin"
 	m.loginValidPassword = "secret"
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "admin", "secret")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "admin", "secret", nil)
 	_, reader, err := c.Backup(context.Background())
 	if err != nil {
 		t.Fatalf("Backup() error: %v", err)
@@ -714,7 +922,7 @@ func TestBackup_AuthMethodForms_InvalidCredentials(t *testing.T) {
 	m.loginValidPassword = "secret"
 	m.loginStatus = http.StatusUnauthorized
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "admin", "wrong")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "admin", "wrong", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail with invalid form login credentials")
@@ -732,7 +940,7 @@ func TestBackup_AuthMethodForms_NoCookieOnSuccessStatus(t *testing.T) {
 	m.loginValidPassword = "secret"
 	m.loginSetCookie = false // server returns 200 but never sets the auth cookie
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "admin", "secret")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "admin", "secret", nil)
 	_, _, err := c.Backup(context.Background())
 	if err == nil {
 		t.Fatal("Backup() should fail when no auth cookie is set despite a 200 login response")
@@ -747,7 +955,7 @@ func TestBackup_AuthMethodNone_NoSessionAuth(t *testing.T) {
 	none := AuthenticationType("none")
 	m.authMethod = &none
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	_, reader, err := c.Backup(context.Background())
 	if err != nil {
 		t.Fatalf("Backup() error: %v", err)
@@ -767,20 +975,21 @@ func TestBackup_APIKeyHeaderReachesServer(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	var gotKey string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/command", m.handleCommandPost)
-	mux.HandleFunc("/api/v1/command/", m.handleCommandGet)
-	mux.HandleFunc("/api/v1/system/backup", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v3/command", m.handleCommandPost)
+	mux.HandleFunc("/api/v3/command/", m.handleCommandGet)
+	mux.HandleFunc("/api/v3/system/backup", func(w http.ResponseWriter, r *http.Request) {
 		gotKey = r.Header.Get("X-Api-Key")
 		m.handleBackups(w, r)
 	})
-	mux.HandleFunc("/api/v1/config/host", m.handleHostConfig)
+	mux.HandleFunc("/api/v3/system/status", m.handleSystemStatus)
+	mux.HandleFunc("/api/v3/config/host", m.handleHostConfig)
 	mux.HandleFunc("/", m.handleDownload)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c, err := NewProwlarrClient(srv.URL, "test-api-key", "", "")
+	c, err := NewSonarrClient(srv.URL, "test-api-key", "", "", nil)
 	if err != nil {
-		t.Fatalf("NewProwlarrClient: %v", err)
+		t.Fatalf("NewSonarrClient: %v", err)
 	}
 	_, reader, err := c.Backup(context.Background())
 	if err != nil {
@@ -800,9 +1009,9 @@ func TestBackup_APIKeyHeaderReachesServer(t *testing.T) {
 func TestBackup_WrongAPIKeyRejected(t *testing.T) {
 	m := newMockArrServer(t, "correct-key")
 
-	c, err := NewProwlarrClient(m.srv.URL, "wrong-key", "", "")
+	c, err := NewSonarrClient(m.srv.URL, "wrong-key", "", "", nil)
 	if err != nil {
-		t.Fatalf("NewProwlarrClient: %v", err)
+		t.Fatalf("NewSonarrClient: %v", err)
 	}
 	_, _, err = c.Backup(context.Background())
 	if err == nil {
@@ -816,7 +1025,7 @@ func TestRestore_Success_NoRestartRequired(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.restoreRestartRequired = false
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	zipData := buildZip(t, map[string]string{"config.xml": "<Config/>"})
 	err := c.Restore(context.Background(), bytes.NewReader(zipData))
 	if err != nil {
@@ -836,8 +1045,8 @@ func TestRestore_RestartRequired_TriggersRestart(t *testing.T) {
 	restartCalled := false
 	origRestart := m.restartStatus
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/system/backup/restore/upload", m.handleRestoreUpload)
-	mux.HandleFunc("/api/v1/system/restart", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v3/system/backup/restore/upload", m.handleRestoreUpload)
+	mux.HandleFunc("/api/v3/system/restart", func(w http.ResponseWriter, r *http.Request) {
 		restartCalled = true
 		if origRestart != 0 && origRestart != http.StatusOK {
 			w.WriteHeader(origRestart)
@@ -848,7 +1057,7 @@ func TestRestore_RestartRequired_TriggersRestart(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c, _ := NewProwlarrClient(srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(srv.URL, "test-api-key", "", "", nil)
 	err := c.Restore(context.Background(), bytes.NewReader(buildZip(t, map[string]string{"config.xml": "<Config/>"})))
 	if err != nil {
 		t.Fatalf("Restore() error: %v", err)
@@ -863,7 +1072,7 @@ func TestRestore_RestartFails(t *testing.T) {
 	m.restoreRestartRequired = true
 	m.restartStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	err := c.Restore(context.Background(), bytes.NewReader(buildZip(t, map[string]string{"config.xml": "<Config/>"})))
 	if err == nil {
 		t.Fatal("Restore() should fail when restart fails")
@@ -877,12 +1086,49 @@ func TestRestore_UploadAPIError(t *testing.T) {
 	m := newMockArrServer(t, "test-api-key")
 	m.restoreUploadStatus = http.StatusInternalServerError
 
-	c, _ := NewProwlarrClient(m.srv.URL, "test-api-key", "", "")
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
 	err := c.Restore(context.Background(), bytes.NewReader(buildZip(t, map[string]string{"config.xml": "<Config/>"})))
 	if err == nil {
 		t.Fatal("Restore() should fail when upload errors")
 	}
 	if !strings.Contains(err.Error(), "restore upload failed") {
 		t.Errorf("error = %q, want mention of restore upload failure", err.Error())
+	}
+}
+
+func TestRestore_PostgresDumpsButNoPostgresConfig(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	zipData := buildZip(t, map[string]string{
+		"config.xml":     configXML("", "", "", "", "", ""),
+		"postgres/x.sql": "SELECT 1;",
+	})
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	err := c.Restore(context.Background(), bytes.NewReader(zipData))
+	if err == nil {
+		t.Fatal("Restore() should fail when postgres dumps exist but config.xml has no postgres settings")
+	}
+	if !strings.Contains(err.Error(), "no postgres settings") {
+		t.Errorf("error = %q, want mention of missing postgres settings", err.Error())
+	}
+}
+
+// With postgres dumps present and a resolvable config, RestoreAllDatabases
+// shells out to psql. Against an unreachable host this fails fast and the
+// error is wrapped by Restore(), regardless of whether psql is installed.
+func TestRestore_PostgresRestoreFailure(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	zipData := buildZip(t, map[string]string{
+		"config.xml":          configXML("127.0.0.1", "1", "user", "pass", "maindb", ""),
+		"postgres/maindb.sql": "SELECT 1;",
+	})
+
+	c, _ := NewSonarrClient(m.srv.URL, "test-api-key", "", "", nil)
+	err := c.Restore(context.Background(), bytes.NewReader(zipData))
+	if err == nil {
+		t.Fatal("Restore() should fail when psql cannot reach the database")
+	}
+	if !strings.Contains(err.Error(), "failed to restore postgres databases") {
+		t.Errorf("error = %q, want mention of postgres restore failure", err.Error())
 	}
 }
