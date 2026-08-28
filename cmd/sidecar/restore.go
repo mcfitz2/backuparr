@@ -35,8 +35,11 @@ const restoreStagingPrefix = ".sidecar-restore-staging-"
 //
 // Extraction is staged into a temporary directory inside backupPath and
 // swapped into place only after the whole archive has been extracted
-// successfully, so a failed or aborted restore (bad archive, size cap
-// exceeded, disk full, etc.) leaves backupPath untouched.
+// successfully. A failure during extraction (bad archive, size cap
+// exceeded, disk full, etc.) leaves backupPath untouched. A failure during
+// the swap itself can leave backupPath partially restored; in that case the
+// staging directory is preserved (its path is included in the returned
+// error) so an operator can recover by hand.
 func restoreFromZip(backupPath string, zipData []byte) (*restoreStats, error) {
 	return restoreFromZipWithLimit(backupPath, zipData, maxRestoreUncompressedBytes)
 }
@@ -60,9 +63,9 @@ func restoreFromZipWithLimit(backupPath string, zipData []byte, maxUncompressedB
 	if err != nil {
 		return nil, fmt.Errorf("failed to create restore staging directory: %w", err)
 	}
-	stagingIntact := true
+	cleanupStaging := true
 	defer func() {
-		if stagingIntact {
+		if cleanupStaging {
 			os.RemoveAll(stagingDir)
 		}
 	}()
@@ -120,10 +123,19 @@ func restoreFromZipWithLimit(backupPath string, zipData []byte, maxUncompressedB
 		stats.BytesRestored += n
 	}
 
-	if err := swapStagingIntoPlace(backupPath, stagingDir); err != nil {
+	mutated, err := swapStagingIntoPlace(backupPath, stagingDir)
+	if err != nil {
+		if mutated {
+			// backupPath has already been partially overwritten; deleting the
+			// staging directory now would destroy the only remaining copy of
+			// the restored data. Skip the deferred cleanup and tell the
+			// operator where to find it instead.
+			cleanupStaging = false
+			return nil, fmt.Errorf("%w (backupPath may be partially restored; restore staging directory preserved at %s for manual recovery)", err, stagingDir)
+		}
 		return nil, err
 	}
-	stagingIntact = false
+	cleanupStaging = false
 
 	return stats, nil
 }
@@ -159,16 +171,27 @@ func extractFile(root *os.Root, relPath string, file *zip.File, remaining int64)
 	return n, nil
 }
 
+// renameFn performs the rename half of the swap. It is a variable so tests
+// can force a deterministic swap failure without relying on filesystem
+// permission races; production code always uses os.Rename.
+var renameFn = os.Rename
+
 // swapStagingIntoPlace moves each top-level entry extracted into stagingDir
 // (a child of backupPath) over the corresponding entry directly under
 // backupPath, replacing whatever was there. Because stagingDir lives inside
 // backupPath, both sides of each rename are on the same filesystem, so the
 // rename is atomic even when backupPath itself is a mount point that cannot
 // be renamed or replaced as a whole.
-func swapStagingIntoPlace(backupPath, stagingDir string) error {
+//
+// The returned bool reports whether backupPath may already have been
+// mutated when err is non-nil, so the caller knows whether it is safe to
+// discard stagingDir: once any entry under backupPath has been touched,
+// stagingDir may hold the only remaining copy of the restored data and must
+// be preserved.
+func swapStagingIntoPlace(backupPath, stagingDir string) (bool, error) {
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
-		return fmt.Errorf("failed to read restore staging directory: %w", err)
+		return false, fmt.Errorf("failed to read restore staging directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -177,14 +200,14 @@ func swapStagingIntoPlace(backupPath, stagingDir string) error {
 		newPath := filepath.Join(stagingDir, name)
 
 		if err := os.RemoveAll(oldPath); err != nil {
-			return fmt.Errorf("failed to remove existing %s before restore swap: %w", name, err)
+			return true, fmt.Errorf("failed to remove existing %s before restore swap: %w", name, err)
 		}
-		if err := os.Rename(newPath, oldPath); err != nil {
-			return fmt.Errorf("failed to move restored %s into place: %w", name, err)
+		if err := renameFn(newPath, oldPath); err != nil {
+			return true, fmt.Errorf("failed to move restored %s into place: %w", name, err)
 		}
 	}
 
-	return os.RemoveAll(stagingDir)
+	return len(entries) > 0, os.RemoveAll(stagingDir)
 }
 
 // restoreStats holds metadata about a completed restore.

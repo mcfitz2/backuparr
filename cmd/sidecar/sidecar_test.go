@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"mime/multipart"
@@ -612,6 +613,54 @@ func TestRestore_FailurePartwayLeavesOriginalIntact(t *testing.T) {
 		if strings.HasPrefix(e.Name(), restoreStagingPrefix) {
 			t.Errorf("leftover staging directory found after failed restore: %s", e.Name())
 		}
+	}
+}
+
+// TestRestore_SwapFailurePreservesStagingDir forces the rename half of the
+// staging-to-backupPath swap to fail after the preceding os.RemoveAll has
+// already deleted the original entry, which is exactly the scenario in
+// which the original data would otherwise be lost. It asserts the staging
+// directory (holding the only remaining copy of the restored data) is not
+// deleted, and that its path is surfaced in the returned error.
+func TestRestore_SwapFailurePreservesStagingDir(t *testing.T) {
+	destDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(destDir, "config.xml"), []byte("original config"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, _ := zw.Create("config.xml")
+	w.Write([]byte("new config"))
+	zw.Close()
+
+	origRename := renameFn
+	renameFn = func(oldpath, newpath string) error {
+		return errors.New("simulated rename failure")
+	}
+	t.Cleanup(func() { renameFn = origRename })
+
+	_, restoreErr := restoreFromZip(destDir, zipBuf.Bytes())
+	if restoreErr == nil {
+		t.Fatal("expected an error from the forced rename failure, got nil")
+	}
+
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		t.Fatalf("ReadDir destDir: %v", err)
+	}
+	var stagingDir string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), restoreStagingPrefix) {
+			stagingDir = filepath.Join(destDir, e.Name())
+		}
+	}
+	if stagingDir == "" {
+		t.Fatal("expected the restore staging directory to survive a swap failure, but it was removed")
+	}
+
+	if !strings.Contains(restoreErr.Error(), stagingDir) {
+		t.Errorf("error %q does not mention the preserved staging directory %q", restoreErr.Error(), stagingDir)
 	}
 }
 
