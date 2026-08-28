@@ -55,6 +55,31 @@ func TestName(t *testing.T) {
 	}
 }
 
+// NewProwlarrClient must wire the credential fields onto the client exactly
+// as given, since every downstream request (generated-client calls via
+// WithRequestEditorFn, and the manual downloadBackup/Restore-upload
+// requests) reads them straight off the struct. This pins that wiring so a
+// future refactor that merges the *arr clients can't silently drop a field.
+// (Unlike sonarr/radarr, ProwlarrClient has no pgOverride field.)
+func TestNewProwlarrClient_StoresCredentials(t *testing.T) {
+	c, err := NewProwlarrClient("http://localhost:9696", "my-api-key", "my-user", "test-password-not-real")
+	if err != nil {
+		t.Fatalf("NewProwlarrClient: %v", err)
+	}
+	if c.apiKey != "my-api-key" {
+		t.Errorf("apiKey = %q, want %q", c.apiKey, "my-api-key")
+	}
+	if c.username != "my-user" {
+		t.Errorf("username = %q, want %q", c.username, "my-user")
+	}
+	if c.password != "test-password-not-real" {
+		t.Errorf("password = %q, want %q", c.password, "test-password-not-real")
+	}
+	if c.baseURL != "http://localhost:9696" {
+		t.Errorf("baseURL = %q, want %q", c.baseURL, "http://localhost:9696")
+	}
+}
+
 // ---- mock server ----
 
 // mockArrServer is a configurable stand-in for the Prowlarr API surface that
@@ -151,9 +176,24 @@ func strPtr(s string) *string        { return &s }
 func int64Ptr(i int64) *int64        { return &i }
 func timePtr(t time.Time) *time.Time { return &t }
 
+// checkAPIKey rejects any request whose X-Api-Key header doesn't match the
+// configured key with 401, so every test below that reaches a 2xx response
+// implicitly proves the header was sent and correct on that endpoint.
+func (m *mockArrServer) checkAPIKey(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-Api-Key") != m.apiKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid api key"}`))
+		return false
+	}
+	return true
+}
+
 func (m *mockArrServer) handleCommandPost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.NotFound(w, r)
+		return
+	}
+	if !m.checkAPIKey(w, r) {
 		return
 	}
 	if m.commandPostStatus != 0 && m.commandPostStatus != http.StatusOK {
@@ -175,6 +215,9 @@ func (m *mockArrServer) handleCommandGet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	m.commandGetCalls++
+	if !m.checkAPIKey(w, r) {
+		return
+	}
 	if m.commandGetStatus != 0 && m.commandGetStatus != http.StatusOK {
 		w.WriteHeader(m.commandGetStatus)
 		w.Write([]byte(`{"error":"command get failed"}`))
@@ -195,6 +238,9 @@ func (m *mockArrServer) handleCommandGet(w http.ResponseWriter, r *http.Request)
 }
 
 func (m *mockArrServer) handleBackups(w http.ResponseWriter, r *http.Request) {
+	if !m.checkAPIKey(w, r) {
+		return
+	}
 	if m.backupsStatus != 0 && m.backupsStatus != http.StatusOK {
 		w.WriteHeader(m.backupsStatus)
 		w.Write([]byte(`{"error":"backups failed"}`))
@@ -205,6 +251,9 @@ func (m *mockArrServer) handleBackups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *mockArrServer) handleHostConfig(w http.ResponseWriter, r *http.Request) {
+	if !m.checkAPIKey(w, r) {
+		return
+	}
 	if m.hostConfigStatus != 0 && m.hostConfigStatus != http.StatusOK {
 		w.WriteHeader(m.hostConfigStatus)
 		w.Write([]byte(`{"error":"host config failed"}`))
@@ -216,6 +265,9 @@ func (m *mockArrServer) handleHostConfig(w http.ResponseWriter, r *http.Request)
 }
 
 func (m *mockArrServer) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if !m.checkAPIKey(w, r) {
+		return
+	}
 	data, ok := m.downloadData[r.URL.Path]
 	if !ok {
 		http.NotFound(w, r)
@@ -253,6 +305,9 @@ func (m *mockArrServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *mockArrServer) handleRestoreUpload(w http.ResponseWriter, r *http.Request) {
+	if !m.checkAPIKey(w, r) {
+		return
+	}
 	m.restoreContentType = r.Header.Get("Content-Type")
 	if m.restoreUploadStatus != 0 && m.restoreUploadStatus != http.StatusOK {
 		w.WriteHeader(m.restoreUploadStatus)
@@ -270,6 +325,9 @@ func (m *mockArrServer) handleRestoreUpload(w http.ResponseWriter, r *http.Reque
 }
 
 func (m *mockArrServer) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if !m.checkAPIKey(w, r) {
+		return
+	}
 	if m.restartStatus != 0 && m.restartStatus != http.StatusOK {
 		w.WriteHeader(m.restartStatus)
 		w.Write([]byte("restart failed"))
@@ -695,6 +753,61 @@ func TestBackup_AuthMethodNone_NoSessionAuth(t *testing.T) {
 		t.Fatalf("Backup() error: %v", err)
 	}
 	reader.Close()
+}
+
+// ---- API key propagation ----
+
+// checkAPIKey (installed on every mock handler above) rejects a mismatched
+// X-Api-Key with 401, so every passing test above already proves the header
+// reaches each endpoint it touches with the right value. This test
+// additionally captures the raw header value on the backup-listing request
+// to pin the exact header name and value used, independent of that
+// pass/fail signal.
+func TestBackup_APIKeyHeaderReachesServer(t *testing.T) {
+	m := newMockArrServer(t, "test-api-key")
+	var gotKey string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/command", m.handleCommandPost)
+	mux.HandleFunc("/api/v1/command/", m.handleCommandGet)
+	mux.HandleFunc("/api/v1/system/backup", func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-Api-Key")
+		m.handleBackups(w, r)
+	})
+	mux.HandleFunc("/api/v1/config/host", m.handleHostConfig)
+	mux.HandleFunc("/", m.handleDownload)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := NewProwlarrClient(srv.URL, "test-api-key", "", "")
+	if err != nil {
+		t.Fatalf("NewProwlarrClient: %v", err)
+	}
+	_, reader, err := c.Backup(context.Background())
+	if err != nil {
+		t.Fatalf("Backup() error: %v", err)
+	}
+	reader.Close()
+
+	if gotKey != "test-api-key" {
+		t.Errorf("X-Api-Key header on backup-listing request = %q, want %q", gotKey, "test-api-key")
+	}
+}
+
+// A mismatched API key is rejected by the (real) *arr API with 401; this
+// pins that Backup() surfaces that as a plain API error rather than masking
+// it. (401 is not in the retry-transport's retryable status set, so this
+// fails on the first attempt, not after a retry delay.)
+func TestBackup_WrongAPIKeyRejected(t *testing.T) {
+	m := newMockArrServer(t, "correct-key")
+
+	c, err := NewProwlarrClient(m.srv.URL, "wrong-key", "", "")
+	if err != nil {
+		t.Fatalf("NewProwlarrClient: %v", err)
+	}
+	_, _, err = c.Backup(context.Background())
+	if err == nil {
+		t.Fatal("Backup() should fail when the client's API key doesn't match the server's")
+	}
 }
 
 // ---- Restore ----
