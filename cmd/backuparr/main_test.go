@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -336,7 +337,7 @@ func TestRunBackup_UploadFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := &fakeClient{name: "sonarr", data: []byte("backup-data")}
 
-			err := runBackup(context.Background(), client, tt.backends, config.RetentionPolicy{})
+			err := runBackup(context.Background(), client, tt.backends, config.RetentionPolicy{}, log.Default())
 
 			if tt.wantErr && err == nil {
 				t.Fatalf("runBackup() = nil, want error")
@@ -357,7 +358,7 @@ func TestRunBackup_AppBackupFails(t *testing.T) {
 	client := &fakeClient{name: "truenas", backupErr: errors.New("API key was rejected")}
 	backend := &fakeBackend{name: "local"}
 
-	err := runBackup(context.Background(), client, []storage.Backend{backend}, config.RetentionPolicy{})
+	err := runBackup(context.Background(), client, []storage.Backend{backend}, config.RetentionPolicy{}, log.Default())
 	if err == nil {
 		t.Fatal("runBackup() = nil, want error")
 	}
@@ -376,7 +377,7 @@ func TestRunBackup_RetentionFailureDoesNotFail(t *testing.T) {
 	backend := &fakeBackend{name: "local", listErr: errors.New("list failed")}
 
 	err := runBackup(context.Background(), client, []storage.Backend{backend},
-		config.RetentionPolicy{KeepLast: 1})
+		config.RetentionPolicy{KeepLast: 1}, log.Default())
 	if err != nil {
 		t.Fatalf("runBackup() = %v, want nil (retention failures are log-only)", err)
 	}
