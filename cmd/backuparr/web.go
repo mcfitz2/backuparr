@@ -59,10 +59,10 @@ type webServer struct {
 }
 
 type appOption struct {
-	Name      string          `json:"name"`
-	AppType   string          `json:"appType"`
-	Backends  []string        `json:"backends"`
-	Retention retentionInfo   `json:"retention"`
+	Name      string        `json:"name"`
+	AppType   string        `json:"appType"`
+	Backends  []string      `json:"backends"`
+	Retention retentionInfo `json:"retention"`
 }
 
 type retentionInfo struct {

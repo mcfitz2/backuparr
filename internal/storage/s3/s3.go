@@ -22,14 +22,14 @@ var _ storage.Backend = (*S3Backend)(nil)
 
 // Config holds the configuration for an S3-compatible storage backend.
 type Config struct {
-	Bucket         string
-	Prefix         string // object key prefix, defaults to "backuparr"
-	Region         string
-	Endpoint       string // custom endpoint for MinIO/R2/B2/Wasabi
-	AccessKeyID    string // optional — falls back to AWS credential chain
+	Bucket          string
+	Prefix          string // object key prefix, defaults to "backuparr"
+	Region          string
+	Endpoint        string // custom endpoint for MinIO/R2/B2/Wasabi
+	AccessKeyID     string // optional — falls back to AWS credential chain
 	SecretAccessKey string
-	StorageClass   string // e.g. "STANDARD", "STANDARD_IA", "DEEP_ARCHIVE"
-	ForcePathStyle bool   // required for MinIO and some S3-compatible stores
+	StorageClass    string // e.g. "STANDARD", "STANDARD_IA", "DEEP_ARCHIVE"
+	ForcePathStyle  bool   // required for MinIO and some S3-compatible stores
 }
 
 // S3Backend stores backups in an S3-compatible object store.

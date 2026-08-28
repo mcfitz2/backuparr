@@ -61,13 +61,13 @@ func createTestBucket(t *testing.T, ctx context.Context) {
 func newTestBackend(t *testing.T, ctx context.Context) *S3Backend {
 	t.Helper()
 	backend, err := New(ctx, Config{
-		Bucket:         testBucket,
-		Prefix:         fmt.Sprintf("test-%d", time.Now().UnixNano()),
-		Region:         testRegion,
-		Endpoint:       testEndpoint,
-		AccessKeyID:    testAccess,
+		Bucket:          testBucket,
+		Prefix:          fmt.Sprintf("test-%d", time.Now().UnixNano()),
+		Region:          testRegion,
+		Endpoint:        testEndpoint,
+		AccessKeyID:     testAccess,
 		SecretAccessKey: testSecret,
-		ForcePathStyle: true,
+		ForcePathStyle:  true,
 	})
 	if err != nil {
 		t.Fatalf("failed to create S3 backend: %v", err)
@@ -294,8 +294,8 @@ func TestS3Backend_ConfigValidation(t *testing.T) {
 	ctx := context.Background()
 	_, err := New(ctx, Config{
 		// Missing required bucket
-		Region:         testRegion,
-		AccessKeyID:    testAccess,
+		Region:          testRegion,
+		AccessKeyID:     testAccess,
 		SecretAccessKey: testSecret,
 	})
 	if err == nil {
@@ -305,9 +305,9 @@ func TestS3Backend_ConfigValidation(t *testing.T) {
 
 func TestParseKey(t *testing.T) {
 	tests := []struct {
-		prefix  string
-		key     string
-		wantApp string
+		prefix   string
+		key      string
+		wantApp  string
 		wantFile string
 	}{
 		{"backuparr", "backuparr/sonarr/sonarr_2026-02-06T120000Z.zip", "sonarr", "sonarr_2026-02-06T120000Z.zip"},
