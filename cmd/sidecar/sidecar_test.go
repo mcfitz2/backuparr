@@ -3,6 +3,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -11,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -310,9 +313,23 @@ func TestHandlerHealth(t *testing.T) {
 	}
 }
 
+// leftoverBackupTempFiles counts files matching the sidecar's backup temp
+// file pattern still sitting in the OS temp dir, so tests can assert the
+// handler cleans up after itself on both the success and failure paths.
+func leftoverBackupTempFiles(t *testing.T) int {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "sidecar-backup-*.zip"))
+	if err != nil {
+		t.Fatalf("glob temp dir: %v", err)
+	}
+	return len(matches)
+}
+
 func TestHandlerBackup(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "test.txt"), []byte("backup me"), 0o644)
+
+	before := leftoverBackupTempFiles(t)
 
 	cfg := &config{BackupPath: dir}
 	rr := httptest.NewRecorder()
@@ -323,7 +340,20 @@ func TestHandlerBackup(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
 
-	zr, err := zip.NewReader(bytes.NewReader(rr.Body.Bytes()), int64(rr.Body.Len()))
+	body := rr.Body.Bytes()
+
+	wantLen := strconv.Itoa(len(body))
+	if got := rr.Header().Get("Content-Length"); got != wantLen {
+		t.Errorf("Content-Length = %q, want %q", got, wantLen)
+	}
+
+	wantSum := sha256.Sum256(body)
+	wantSumHex := hex.EncodeToString(wantSum[:])
+	if got := rr.Header().Get("X-Backup-Sha256"); got != wantSumHex {
+		t.Errorf("X-Backup-Sha256 = %q, want %q (sha256 of the actual response body)", got, wantSumHex)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		t.Fatalf("invalid ZIP: %v", err)
 	}
@@ -336,6 +366,47 @@ func TestHandlerBackup(t *testing.T) {
 	rc.Close()
 	if string(data) != "backup me" {
 		t.Errorf("content = %q", data)
+	}
+
+	if got := leftoverBackupTempFiles(t); got != before {
+		t.Errorf("leftover backup temp files = %d, want %d (no leak on success path)", got, before)
+	}
+}
+
+// TestHandlerBackup_CreateBackupFailsReturnsError verifies that when the
+// archive build fails, the handler returns a real error status rather than
+// a 200 OK with an empty or truncated body. Prior to building the archive
+// in a temp file before writing any header, this test fails: the handler
+// wrote Content-Type/Content-Disposition (committing a 200) before calling
+// createBackup, so a mid-build failure surfaced as HTTP 200 with a
+// zero-length body.
+func TestHandlerBackup_CreateBackupFailsReturnsError(t *testing.T) {
+	before := leftoverBackupTempFiles(t)
+
+	// A BackupPath that doesn't exist makes createBackup fail while walking
+	// the directory tree, before any bytes are written.
+	cfg := &config{BackupPath: filepath.Join(t.TempDir(), "does-not-exist")}
+	rr := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/backup", nil)
+	handleBackup(cfg)(rr, req)
+
+	if rr.Code < 500 || rr.Code >= 600 {
+		t.Fatalf("status = %d, want 5xx", rr.Code)
+	}
+	if rr.Body.Len() == 0 {
+		t.Error("expected a non-empty error body, got zero-length body")
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("error response is not valid JSON: %v (body: %q)", err, rr.Body.String())
+	}
+	if resp["success"] != false {
+		t.Errorf(`response["success"] = %v, want false`, resp["success"])
+	}
+
+	if got := leftoverBackupTempFiles(t); got != before {
+		t.Errorf("leftover backup temp files = %d, want %d (no leak on failure path)", got, before)
 	}
 }
 
