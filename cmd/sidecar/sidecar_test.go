@@ -431,6 +431,225 @@ func TestRestoreFromZip_ZipSlip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Restore extraction hardening (archive modes, symlinks, size cap, rollback)
+// ---------------------------------------------------------------------------
+
+func TestRestore_StripsSetuidBit(t *testing.T) {
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	hdr := &zip.FileHeader{Name: "evil.sh", Method: zip.Deflate}
+	hdr.SetMode(0o755 | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	w.Write([]byte("#!/bin/sh\necho pwned\n"))
+	zw.Close()
+
+	destDir := t.TempDir()
+	if _, err := restoreFromZip(destDir, zipBuf.Bytes()); err != nil {
+		t.Fatalf("restoreFromZip: %v", err)
+	}
+
+	fi, err := os.Stat(filepath.Join(destDir, "evil.sh"))
+	if err != nil {
+		t.Fatalf("Stat evil.sh: %v", err)
+	}
+	if fi.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		t.Errorf("extracted file retained a special mode bit: %v", fi.Mode())
+	}
+	if perm := fi.Mode().Perm(); perm != 0o644 {
+		t.Errorf("extracted file perm = %o, want 0644", perm)
+	}
+}
+
+func TestRestore_StripsSetuidBitOnDirectory(t *testing.T) {
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	hdr := &zip.FileHeader{Name: "evildir/", Method: zip.Store}
+	hdr.SetMode(os.ModeDir | 0o755 | os.ModeSetgid | os.ModeSticky)
+	_, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	zw.Close()
+
+	destDir := t.TempDir()
+	if _, err := restoreFromZip(destDir, zipBuf.Bytes()); err != nil {
+		t.Fatalf("restoreFromZip: %v", err)
+	}
+
+	fi, err := os.Stat(filepath.Join(destDir, "evildir"))
+	if err != nil {
+		t.Fatalf("Stat evildir: %v", err)
+	}
+	if fi.Mode()&(os.ModeSetgid|os.ModeSticky) != 0 {
+		t.Errorf("extracted directory retained a special mode bit: %v", fi.Mode())
+	}
+}
+
+func TestRestore_SymlinkDestinationNotFollowed(t *testing.T) {
+	backupDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("original"), 0o644); err != nil {
+		t.Fatalf("WriteFile outsideFile: %v", err)
+	}
+
+	linkPath := filepath.Join(backupDir, "config.xml")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, _ := zw.Create("config.xml")
+	w.Write([]byte("malicious overwrite"))
+	zw.Close()
+
+	if _, err := restoreFromZip(backupDir, zipBuf.Bytes()); err != nil {
+		t.Fatalf("restoreFromZip: %v", err)
+	}
+
+	data, err := os.ReadFile(outsideFile)
+	if err != nil {
+		t.Fatalf("ReadFile outsideFile: %v", err)
+	}
+	if string(data) != "original" {
+		t.Errorf("outside target was modified: got %q, want %q", data, "original")
+	}
+
+	restored, err := os.ReadFile(linkPath)
+	if err != nil {
+		t.Fatalf("ReadFile linkPath: %v", err)
+	}
+	if string(restored) != "malicious overwrite" {
+		t.Errorf("config.xml = %q, want the restored content", restored)
+	}
+	if fi, err := os.Lstat(linkPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("config.xml is still a symlink after restore")
+	}
+}
+
+func TestRestore_SizeCapExceeded(t *testing.T) {
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, _ := zw.Create("big.bin")
+	w.Write(bytes.Repeat([]byte("A"), 64))
+	zw.Close()
+
+	destDir := t.TempDir()
+	_, err := restoreFromZipWithLimit(destDir, zipBuf.Bytes(), 10)
+	if err == nil {
+		t.Fatal("expected an error when uncompressed size exceeds the cap, got nil")
+	}
+
+	if _, statErr := os.Stat(filepath.Join(destDir, "big.bin")); statErr == nil {
+		t.Errorf("big.bin should not exist in destDir after a capped restore failure")
+	}
+}
+
+// TestRestore_FailurePartwayLeavesOriginalIntact forces extraction to fail on
+// the second of two entries (a corrupted CRC32, detected by archive/zip
+// itself while reading, independent of any size cap) and asserts the
+// original destination directory is completely unaffected. This uses only
+// restoreFromZip (not the WithLimit test seam) so the same test can be run
+// against the pre-fix implementation to demonstrate the in-place-overwrite
+// bug it exercises.
+func TestRestore_FailurePartwayLeavesOriginalIntact(t *testing.T) {
+	destDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(destDir, "config.xml"), []byte("original config"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "untouched.txt"), []byte("keep me"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	w, _ := zw.Create("config.xml")
+	w.Write([]byte("new config that should never land"))
+
+	corrupt := []byte("this entry has a deliberately wrong CRC32")
+	hdr := &zip.FileHeader{Name: "corrupt.bin", Method: zip.Store}
+	hdr.CompressedSize64 = uint64(len(corrupt))
+	hdr.UncompressedSize64 = uint64(len(corrupt))
+	hdr.CRC32 = 0x11111111 // deliberately wrong, triggers zip.ErrChecksum on read
+	cw, err := zw.CreateRaw(hdr)
+	if err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	}
+	cw.Write(corrupt)
+	zw.Close()
+
+	_, err = restoreFromZip(destDir, zipBuf.Bytes())
+	if err == nil {
+		t.Fatal("expected an error from the corrupted second entry, got nil")
+	}
+
+	data, err := os.ReadFile(filepath.Join(destDir, "config.xml"))
+	if err != nil {
+		t.Fatalf("ReadFile config.xml: %v", err)
+	}
+	if string(data) != "original config" {
+		t.Errorf("config.xml was modified despite a failed restore: got %q", data)
+	}
+
+	data, err = os.ReadFile(filepath.Join(destDir, "untouched.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile untouched.txt: %v", err)
+	}
+	if string(data) != "keep me" {
+		t.Errorf("untouched.txt was modified despite a failed restore: got %q", data)
+	}
+
+	// No staging leftovers should remain in the destination directory.
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		t.Fatalf("ReadDir destDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), restoreStagingPrefix) {
+			t.Errorf("leftover staging directory found after failed restore: %s", e.Name())
+		}
+	}
+}
+
+func TestRestore_NormalArchiveStillWorks(t *testing.T) {
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	dirHdr := &zip.FileHeader{Name: "nested/deeper/", Method: zip.Store}
+	dirHdr.SetMode(os.ModeDir | 0o755)
+	if _, err := zw.CreateHeader(dirHdr); err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	w, _ := zw.Create("config.xml")
+	w.Write([]byte("<config>ok</config>"))
+	w, _ = zw.Create("nested/deeper/data.txt")
+	w.Write([]byte("deep data"))
+	zw.Close()
+
+	destDir := t.TempDir()
+	stats, err := restoreFromZip(destDir, zipBuf.Bytes())
+	if err != nil {
+		t.Fatalf("restoreFromZip: %v", err)
+	}
+	if stats.FilesRestored != 2 {
+		t.Errorf("FilesRestored = %d, want 2", stats.FilesRestored)
+	}
+
+	data, err := os.ReadFile(filepath.Join(destDir, "config.xml"))
+	if err != nil || string(data) != "<config>ok</config>" {
+		t.Errorf("config.xml = %q, err = %v", data, err)
+	}
+
+	data, err = os.ReadFile(filepath.Join(destDir, "nested", "deeper", "data.txt"))
+	if err != nil || string(data) != "deep data" {
+		t.Errorf("nested/deeper/data.txt = %q, err = %v", data, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Roundtrip (backup → restore)
 // ---------------------------------------------------------------------------
 
