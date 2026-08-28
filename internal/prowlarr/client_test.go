@@ -14,36 +14,10 @@ import (
 )
 
 // ---- small helper unit tests ----
-
-func TestDerefString(t *testing.T) {
-	s := "hello"
-	if derefString(&s) != "hello" {
-		t.Errorf("derefString(&s) = %q, want %q", derefString(&s), "hello")
-	}
-	if derefString(nil) != "" {
-		t.Errorf("derefString(nil) = %q, want empty string", derefString(nil))
-	}
-}
-
-func TestDerefInt64(t *testing.T) {
-	var i int64 = 42
-	if derefInt64(&i) != 42 {
-		t.Errorf("derefInt64(&i) = %d, want 42", derefInt64(&i))
-	}
-	if derefInt64(nil) != 0 {
-		t.Errorf("derefInt64(nil) = %d, want 0", derefInt64(nil))
-	}
-}
-
-func TestDerefTime(t *testing.T) {
-	now := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	if got := derefTime(&now); !got.Equal(now) {
-		t.Errorf("derefTime(&now) = %v, want %v", got, now)
-	}
-	if got := derefTime(nil); !got.IsZero() {
-		t.Errorf("derefTime(nil) = %v, want zero time", got)
-	}
-}
+//
+// derefString/derefInt64/derefTime now live in internal/arr (shared by all
+// three *arr clients) and are covered there directly; see
+// internal/arr/client_test.go.
 
 func TestName(t *testing.T) {
 	c, err := NewProwlarrClient("http://localhost:9696", "key", "", "")
@@ -66,17 +40,17 @@ func TestNewProwlarrClient_StoresCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProwlarrClient: %v", err)
 	}
-	if c.apiKey != "my-api-key" {
-		t.Errorf("apiKey = %q, want %q", c.apiKey, "my-api-key")
+	if c.APIKey() != "my-api-key" {
+		t.Errorf("apiKey = %q, want %q", c.APIKey(), "my-api-key")
 	}
-	if c.username != "my-user" {
-		t.Errorf("username = %q, want %q", c.username, "my-user")
+	if c.Username() != "my-user" {
+		t.Errorf("username = %q, want %q", c.Username(), "my-user")
 	}
-	if c.password != "test-password-not-real" {
-		t.Errorf("password = %q, want %q", c.password, "test-password-not-real")
+	if c.Password() != "test-password-not-real" {
+		t.Errorf("password = %q, want %q", c.Password(), "test-password-not-real")
 	}
-	if c.baseURL != "http://localhost:9696" {
-		t.Errorf("baseURL = %q, want %q", c.baseURL, "http://localhost:9696")
+	if c.BaseURL() != "http://localhost:9696" {
+		t.Errorf("baseURL = %q, want %q", c.BaseURL(), "http://localhost:9696")
 	}
 }
 
