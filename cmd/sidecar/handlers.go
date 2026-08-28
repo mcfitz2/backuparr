@@ -3,11 +3,14 @@ package main
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 )
 
 // handleHealth reports sidecar status and capabilities.
@@ -33,6 +36,9 @@ func handleHealth(cfg *config) http.HandlerFunc {
 }
 
 // handleBackup creates a ZIP backup and streams it to the response.
+// The archive is built to a temp file first so that a failure never leaves
+// the client holding an empty or truncated ZIP behind a 200 OK: headers
+// are only written once the archive is known to be complete.
 // POST /api/v1/backup
 func handleBackup(cfg *config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -43,20 +49,53 @@ func handleBackup(cfg *config) http.HandlerFunc {
 
 		log.Printf("[sidecar] Backup requested for %s", cfg.BackupPath)
 
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", `attachment; filename="backup.zip"`)
-
-		stats, err := createBackup(cfg.BackupPath, cfg.ExcludePatterns, w)
+		tmp, err := os.CreateTemp("", "sidecar-backup-*.zip")
 		if err != nil {
-			// If headers haven't been sent yet, return a proper error
+			httpError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create temp file: %v", err))
+			return
+		}
+		defer os.Remove(tmp.Name())
+		defer tmp.Close()
+
+		// Hash while writing (tee into the hasher) rather than re-reading the
+		// temp file afterward — avoids a second full pass over a possibly
+		// large archive on a memory-constrained sidecar.
+		sum := sha256.New()
+		stats, err := createBackup(cfg.BackupPath, cfg.ExcludePatterns, io.MultiWriter(tmp, sum))
+		if err != nil {
 			log.Printf("[sidecar] Backup failed: %v", err)
-			// Note: if we've already started writing the ZIP, the client will
-			// get a truncated file and should detect it as corrupt.
+			httpError(w, http.StatusInternalServerError, fmt.Sprintf("backup failed: %v", err))
 			return
 		}
 
-		log.Printf("[sidecar] Backup complete: %d files (%d SQLite), %d bytes",
-			stats.TotalFiles, stats.SQLiteFiles, stats.TotalBytes)
+		info, err := tmp.Stat()
+		if err != nil {
+			log.Printf("[sidecar] Backup failed: %v", err)
+			httpError(w, http.StatusInternalServerError, fmt.Sprintf("failed to stat backup: %v", err))
+			return
+		}
+
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			log.Printf("[sidecar] Backup failed: %v", err)
+			httpError(w, http.StatusInternalServerError, fmt.Sprintf("failed to rewind backup: %v", err))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="backup.zip"`)
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+		w.Header().Set("X-Backup-Sha256", hex.EncodeToString(sum.Sum(nil)))
+		w.WriteHeader(http.StatusOK)
+
+		if _, err := io.Copy(w, tmp); err != nil {
+			// Headers are already committed at this point; nothing left to do
+			// but log — the client will see a short read and can retry.
+			log.Printf("[sidecar] Backup failed while streaming response: %v", err)
+			return
+		}
+
+		log.Printf("[sidecar] Backup complete: %d files (%d SQLite, %d via direct-copy fallback), %d bytes",
+			stats.TotalFiles, stats.SQLiteFiles, stats.SQLiteFallback, stats.TotalBytes)
 	}
 }
 
