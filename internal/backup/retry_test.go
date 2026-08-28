@@ -1,10 +1,12 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -272,9 +274,11 @@ func TestRetryTransport_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
-// TestRetryTransport_PreservesRequestBody covers a POST built with
-// strings.NewReader, for which http.NewRequest auto-populates GetBody —
-// this is the caller-opt-in path, so the request is expected to retry.
+// TestRetryTransport_PreservesRequestBody covers a POST whose context was
+// explicitly marked via WithReplayableRequest. The body is built with
+// strings.NewReader (so GetBody is also auto-populated), but it's the
+// explicit context opt-in — not GetBody alone — that authorizes retrying
+// this non-idempotent method.
 func TestRetryTransport_PreservesRequestBody(t *testing.T) {
 	var bodies []string
 	mock := &mockTransport{
@@ -288,7 +292,8 @@ func TestRetryTransport_PreservesRequestBody(t *testing.T) {
 
 	rt := &RetryTransport{Base: captureMock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
 	body := `{"command":"Backup"}`
-	req, _ := http.NewRequest("POST", "http://example.com", strings.NewReader(body))
+	ctx := WithReplayableRequest(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "POST", "http://example.com", strings.NewReader(body))
 	req.ContentLength = int64(len(body))
 	if req.GetBody == nil {
 		t.Fatal("expected http.NewRequest to auto-populate GetBody for a strings.Reader body")
@@ -516,7 +521,57 @@ func TestRetryTransport_PostNotRetriedByDefault(t *testing.T) {
 	}
 }
 
-func TestRetryTransport_PostRetriesWhenGetBodySet(t *testing.T) {
+// TestRetryTransport_AutoGetBodyAloneDoesNotAuthorizeReplay builds a POST
+// body exactly the way internal/sidecar/client.go's Restore does: a
+// multipart form written into a bytes.Buffer, then passed by address to
+// http.NewRequestWithContext. That makes http.NewRequest auto-populate
+// req.GetBody for the *bytes.Buffer body — but since the request's context
+// was never marked with WithReplayableRequest, that auto-populated GetBody
+// must NOT be treated as caller opt-in. The request must get exactly one
+// attempt.
+func TestRetryTransport_AutoGetBodyAloneDoesNotAuthorizeReplay(t *testing.T) {
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
+			{status: 200, body: "ok"},
+		},
+	}
+
+	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("backup", "backup.zip")
+	if err != nil {
+		t.Fatalf("failed to create form file: %v", err)
+	}
+	if _, err := part.Write([]byte("fake zip contents")); err != nil {
+		t.Fatalf("failed to write form data: %v", err)
+	}
+	writer.Close()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.com/api/v1/restore", &body)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if req.GetBody == nil {
+		t.Fatal("test setup invalid: expected http.NewRequest to auto-populate GetBody for a *bytes.Buffer body")
+	}
+
+	_, err = rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected the single attempt's error to be returned, got nil")
+	}
+	if mock.calls.Load() != 1 {
+		t.Errorf("expected exactly 1 attempt for a POST with only an auto-populated GetBody (no explicit opt-in), got %d", mock.calls.Load())
+	}
+}
+
+// TestRetryTransport_ExplicitOptInAuthorizesReplay mirrors the test above,
+// except the context is marked via WithReplayableRequest, which is the only
+// thing that should authorize retrying a POST.
+func TestRetryTransport_ExplicitOptInAuthorizesReplay(t *testing.T) {
 	mock := &mockTransport{
 		responses: []mockResponse{
 			{err: fmt.Errorf("read tcp: %w", syscall.ECONNRESET)},
@@ -527,10 +582,11 @@ func TestRetryTransport_PostRetriesWhenGetBodySet(t *testing.T) {
 
 	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
 	body := `{"name":"Backup"}`
-	// strings.NewReader is one of the reader types http.NewRequest
-	// recognizes and auto-populates GetBody for, which is how a caller
-	// opts a POST into safe replay.
-	req, _ := http.NewRequest(http.MethodPost, "http://example.com", strings.NewReader(body))
+	ctx := WithReplayableRequest(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.com", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
 	if req.GetBody == nil {
 		t.Fatal("test setup invalid: expected GetBody to be set")
 	}
@@ -542,7 +598,7 @@ func TestRetryTransport_PostRetriesWhenGetBodySet(t *testing.T) {
 	defer resp.Body.Close()
 
 	if mock.calls.Load() != 3 {
-		t.Errorf("expected 3 attempts for a POST with GetBody set, got %d", mock.calls.Load())
+		t.Errorf("expected 3 attempts for a POST with explicit WithReplayableRequest opt-in, got %d", mock.calls.Load())
 	}
 }
 

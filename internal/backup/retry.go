@@ -37,6 +37,27 @@ const maxBufferedErrorBody = 64 * 1024 // 64KB
 // held entirely in memory.
 const maxBufferedRequestBody = 1 << 20 // 1MB
 
+// replayableContextKey is the context key used by WithReplayableRequest.
+type replayableContextKey struct{}
+
+// WithReplayableRequest marks ctx so that RetryTransport will retry a
+// request built from it even though its method (e.g. POST) isn't
+// idempotent by convention. This must be opted into deliberately by the
+// caller: an auto-populated req.GetBody (which http.NewRequest sets for
+// *bytes.Buffer, *bytes.Reader, and *strings.Reader bodies) only means the
+// body CAN be regenerated, not that the server-side effect of resending
+// the request is safe — so GetBody alone is never sufficient to authorize
+// retrying a non-idempotent method.
+func WithReplayableRequest(ctx context.Context) context.Context {
+	return context.WithValue(ctx, replayableContextKey{}, true)
+}
+
+// isReplayableRequest reports whether ctx was marked via WithReplayableRequest.
+func isReplayableRequest(ctx context.Context) bool {
+	v, _ := ctx.Value(replayableContextKey{}).(bool)
+	return v
+}
+
 // NewRetryTransport creates a RetryTransport with sensible defaults:
 // 3 retries with 2s base delay (2s, 4s, 8s backoff).
 // If base is nil, http.DefaultTransport is used.
@@ -54,15 +75,19 @@ func NewRetryTransport(base http.RoundTripper) *RetryTransport {
 // RoundTrip executes the request with automatic retries on transient failures.
 func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// A request can only be retried if resending it is safe: GET/HEAD/PUT/DELETE
-	// are idempotent by convention, and anything else needs the caller to have
-	// opted in via GetBody. Otherwise a single attempt is made and its result
-	// (success or failure) is returned as-is — retrying could duplicate a real
-	// side effect, e.g. a restore upload or a restart command.
-	getBody := req.GetBody
-	if !isReplayableMethod(req.Method) && getBody == nil {
+	// are idempotent by convention; anything else (e.g. POST) needs the caller
+	// to have explicitly marked its context with WithReplayableRequest.
+	// req.GetBody is deliberately NOT treated as opt-in here — http.NewRequest
+	// auto-populates it for common body types regardless of programmer intent,
+	// so its presence only means the body can be regenerated, not that
+	// resending the request is safe. Otherwise a single attempt is made and
+	// its result (success or failure) is returned as-is — retrying could
+	// duplicate a real side effect, e.g. a restore upload or a restart command.
+	if !isReplayableMethod(req.Method) && !isReplayableRequest(req.Context()) {
 		return t.Base.RoundTrip(req)
 	}
 
+	getBody := req.GetBody
 	var bodyBytes []byte
 	if getBody == nil && req.Body != nil && req.Body != http.NoBody {
 		buf, err := io.ReadAll(io.LimitReader(req.Body, maxBufferedRequestBody+1))
@@ -182,8 +207,8 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // isReplayableMethod returns true for HTTP methods that are safe to retry
-// without a caller-supplied GetBody, because resending them is idempotent
-// by convention.
+// without an explicit WithReplayableRequest opt-in, because resending them
+// is idempotent by convention.
 func isReplayableMethod(method string) bool {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
