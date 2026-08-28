@@ -34,6 +34,13 @@ type RetentionPolicy struct {
 	KeepYearly  int `yaml:"keepYearly"`
 }
 
+// isZero reports whether every keepX field is zero, i.e. the policy keeps
+// nothing. An omitted "retention:" block decodes to exactly this value.
+func (p RetentionPolicy) isZero() bool {
+	return p.KeepLast == 0 && p.KeepHourly == 0 && p.KeepDaily == 0 &&
+		p.KeepWeekly == 0 && p.KeepMonthly == 0 && p.KeepYearly == 0
+}
+
 type Connection struct {
 	APIKey   string `yaml:"apiKey"`
 	URL      string `yaml:"url"`
@@ -89,7 +96,25 @@ func Parse(path string) (BackuparrConfig, error) {
 		}
 		return BackuparrConfig{}, fmt.Errorf("error parsing config: %w", err)
 	}
+
+	for _, app := range cfg.AppConfigs {
+		if app.Retention.isZero() {
+			return BackuparrConfig{}, fmt.Errorf(
+				"app %q: retention policy is empty (no keepLast/keepHourly/keepDaily/keepWeekly/keepMonthly/keepYearly set); "+
+					"this would delete every existing backup on the next run, so refusing to load", appLabel(app))
+		}
+	}
+
 	return cfg, nil
+}
+
+// appLabel returns the display name for an app config for use in error
+// messages, falling back to its type when no name is set.
+func appLabel(app AppConfig) string {
+	if app.Name != "" {
+		return app.Name
+	}
+	return app.AppType
 }
 
 // Path resolves the config file path from (in order of priority):
