@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -321,5 +324,143 @@ func TestParseKey(t *testing.T) {
 			t.Errorf("parseKey(%q, %q) = (%q, %q), want (%q, %q)",
 				tt.prefix, tt.key, app, file, tt.wantApp, tt.wantFile)
 		}
+	}
+}
+
+// --- manager.Uploader swap, without MinIO or live S3 -----------------------
+//
+// Upload() now goes through manager.Uploader instead of a bare PutObject
+// call. These tests point the S3 client at an in-process httptest server
+// that speaks just enough of the S3 REST API to exercise that path — no
+// Docker/MinIO required, unlike the tests above.
+//
+// TestS3Backend_Upload_Multipart is the closest thing here to proving the
+// multipart mechanism works, but it only proves the SDK's manager package
+// drives CreateMultipartUpload/UploadPart/CompleteMultipartUpload correctly
+// against a fake server that always succeeds; it says nothing about behavior
+// against real S3 semantics (e.g. actual minimum part size enforcement,
+// retries on part failure, or true concurrent network transfer). That would
+// need MinIO (make test-s3) or live S3.
+
+func newFakeS3Backend(t *testing.T, handler http.HandlerFunc) *S3Backend {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	backend, err := New(context.Background(), Config{
+		Bucket:          "fake-bucket",
+		Prefix:          "backuparr",
+		Region:          "us-east-1",
+		Endpoint:        srv.URL,
+		AccessKeyID:     "test-key",
+		SecretAccessKey: "test-secret",
+		ForcePathStyle:  true,
+	})
+	if err != nil {
+		t.Fatalf("failed to create backend: %v", err)
+	}
+	return backend
+}
+
+func TestS3Backend_Upload_SinglePart(t *testing.T) {
+	var gotMethod, gotPath string
+	backend := newFakeS3Backend(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		// Drain the body: an unread large request body left when the handler
+		// returns makes the OS close the connection with a RST on Linux.
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("ETag", `"single-part-etag"`)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	data := []byte("small backup payload")
+	fileName := "sonarr_2026-02-06T120000Z.zip"
+	meta, err := backend.Upload(context.Background(), "sonarr", fileName, bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+
+	if gotMethod != http.MethodPut {
+		t.Errorf("a payload under the default part size should upload via a single PUT, got method %q", gotMethod)
+	}
+	if !strings.Contains(gotPath, fileName) {
+		t.Errorf("request path = %q, want it to contain %q", gotPath, fileName)
+	}
+	if meta.Key != "backuparr/sonarr/"+fileName {
+		t.Errorf("meta.Key = %q, want %q", meta.Key, "backuparr/sonarr/"+fileName)
+	}
+	if meta.AppName != "sonarr" || meta.FileName != fileName {
+		t.Errorf("meta = %+v, unexpected AppName/FileName", meta)
+	}
+	if meta.Size != int64(len(data)) {
+		t.Errorf("meta.Size = %d, want %d", meta.Size, len(data))
+	}
+}
+
+func TestS3Backend_Upload_Multipart(t *testing.T) {
+	const uploadID = "test-upload-id"
+
+	var (
+		mu        sync.Mutex
+		partsSeen = map[string]bool{}
+		completed bool
+	)
+
+	backend := newFakeS3Backend(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		q := r.URL.Query()
+		switch {
+		case r.Method == http.MethodPost && q.Has("uploads"):
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult><Bucket>fake-bucket</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`,
+				r.URL.Path, uploadID)
+
+		case r.Method == http.MethodPut && q.Get("partNumber") != "":
+			mu.Lock()
+			partsSeen[q.Get("partNumber")] = true
+			mu.Unlock()
+			w.Header().Set("ETag", fmt.Sprintf(`"part-%s-etag"`, q.Get("partNumber")))
+			w.WriteHeader(http.StatusOK)
+
+		case r.Method == http.MethodPost && q.Get("uploadId") != "":
+			mu.Lock()
+			completed = true
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/xml")
+			fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<CompleteMultipartUploadResult><Location>http://fake/%s</Location><Bucket>fake-bucket</Bucket><Key>%s</Key><ETag>&quot;final-etag&quot;</ETag></CompleteMultipartUploadResult>`,
+				r.URL.Path, r.URL.Path)
+
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+
+	// One byte over the SDK's default 5MiB part size forces two parts, so the
+	// upload can only succeed if CreateMultipartUpload/UploadPart/Complete all
+	// went through manager.Uploader correctly. bytes.NewReader supports
+	// io.ReaderAt, so the SDK can size this up front without buffering.
+	data := bytes.Repeat([]byte{0xAB}, 5*1024*1024+1)
+	fileName := "sonarr_2026-02-06T120000Z.zip"
+	meta, err := backend.Upload(context.Background(), "sonarr", fileName, bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("Upload failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(partsSeen) != 2 {
+		t.Errorf("saw %d part(s) uploaded, want 2: %v", len(partsSeen), partsSeen)
+	}
+	if !completed {
+		t.Error("CompleteMultipartUpload was never called")
+	}
+	if meta.Size != int64(len(data)) {
+		t.Errorf("meta.Size = %d, want %d", meta.Size, len(data))
+	}
+	if meta.AppName != "sonarr" || meta.FileName != fileName {
+		t.Errorf("meta = %+v, unexpected AppName/FileName", meta)
 	}
 }

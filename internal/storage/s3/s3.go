@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -35,6 +36,7 @@ type Config struct {
 // S3Backend stores backups in an S3-compatible object store.
 type S3Backend struct {
 	client       *s3.Client
+	uploader     *manager.Uploader
 	bucket       string
 	prefix       string
 	storageClass s3types.StorageClass
@@ -99,6 +101,7 @@ func New(ctx context.Context, cfg Config) (*S3Backend, error) {
 
 	return &S3Backend{
 		client:       client,
+		uploader:     manager.NewUploader(client),
 		bucket:       cfg.Bucket,
 		prefix:       prefix,
 		storageClass: sc,
@@ -150,7 +153,10 @@ func (b *S3Backend) Upload(ctx context.Context, appName string, fileName string,
 		input.ContentLength = aws.Int64(size)
 	}
 
-	_, err := b.client.PutObject(ctx, input)
+	// manager.Uploader multiparts automatically once the body exceeds its part
+	// size (default 5MiB), removing PutObject's 5GiB ceiling and giving large
+	// uploads concurrency; it falls back to a single PutObject for small bodies.
+	_, err := b.uploader.Upload(ctx, input)
 	if err != nil {
 		return nil, fmt.Errorf("s3: failed to upload %s: %w", key, err)
 	}
