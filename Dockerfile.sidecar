@@ -18,5 +18,18 @@ RUN apt-get update && \
 
 COPY --from=builder /backuparr-sidecar /usr/local/bin/backuparr-sidecar
 
+# Fixed UID/GID (not shared with the backuparr/web images) so operators can
+# pre-chown the mounted BACKUP_PATH volume to a known, stable ID. Restore
+# extracts archive-supplied files into that volume, so it must be writable by
+# this UID (or group-writable with this GID). The Docker-socket restart path
+# (DOCKER_CONTAINER) additionally needs the socket accessible to this user —
+# e.g. `docker run --group-add "$(stat -c %g /var/run/docker.sock)"` — since
+# the host's docker group GID isn't known at image build time; the Kubernetes
+# restart path uses the in-cluster service-account token and needs no
+# additional access.
+RUN groupadd -g 10001 backuparr && \
+    useradd -u 10001 -g backuparr -d /nonexistent -s /usr/sbin/nologin backuparr
+
 EXPOSE 8484
+USER backuparr
 ENTRYPOINT ["backuparr-sidecar"]

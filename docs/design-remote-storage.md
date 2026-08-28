@@ -10,7 +10,7 @@ Backuparr currently supports backing up Sonarr/Radarr instances to the local fil
 2. **Retention management** — each backend enforces the retention policy defined in config.
 3. **Restore from remote** — pull a specific backup from remote storage and restore it.
 4. **Multiple destinations** — a single app can back up to several destinations simultaneously.
-5. **Streaming where possible** — avoid buffering entire backups in memory when the backend supports it.
+5. **Streaming where possible** — avoid buffering entire backups in memory when the backend supports it. *(Aspirational — not yet delivered. The shipped orchestrator reads the entire backup into memory with `io.ReadAll` before uploading; see [Orchestrator Changes](#orchestrator-changes-maingo) below.)*
 
 ## Non-Goals
 
@@ -24,11 +24,12 @@ Backuparr currently supports backing up Sonarr/Radarr instances to the local fil
 
 ### Storage Interface
 
-A new `storage` package defines the contract that every backend must satisfy:
+The `internal/storage` package defines the contract that every backend must satisfy:
 
 ```
-storage/
+internal/storage/
   storage.go        # Interface + types
+  retention.go      # ApplyRetention() helper
   s3/
     s3.go           # S3 backend
   local/
@@ -53,10 +54,18 @@ type BackupMetadata struct {
     CreatedAt time.Time
 }
 
-// Backend is the interface every remote storage provider implements.
+// Backend is the interface every storage provider implements.
 type Backend interface {
-    // Name returns a human-readable backend identifier (e.g. "s3", "pbs", "local").
+    // Type returns the backend type identifier (e.g. "s3", "local").
+    Type() string
+
+    // Name returns a display name for this backend instance. Defaults to Type()
+    // but can be overridden in config to distinguish multiple backends of the
+    // same type (e.g. two local backends named "nas" and "usb").
     Name() string
+
+    // SetName overrides the display name returned by Name().
+    SetName(name string)
 
     // Upload stores backup data and returns metadata for the stored object.
     Upload(ctx context.Context, appName string, fileName string, data io.Reader, size int64) (*BackupMetadata, error)
@@ -75,7 +84,7 @@ type Backend interface {
 Retention is intentionally **not** part of the interface. A shared `storage.ApplyRetention()` helper calls `List` + `Delete` using the `RetentionPolicy` from config. This avoids duplicating retention logic in every backend.
 
 ```go
-// storage/retention.go
+// internal/storage/retention.go
 
 // ApplyRetention lists existing backups and deletes those that exceed the policy.
 func ApplyRetention(ctx context.Context, backend Backend, appName string, policy RetentionPolicy) (deleted int, err error)
@@ -138,7 +147,7 @@ s3://my-backups/backuparr/radarr/radarr_backup_v6.0.4.10291_2026.02.05_19.13.04.
 - **Download**: `s3.GetObject` returns a `ReadCloser`.
 - **List**: `s3.ListObjectsV2` with prefix `<prefix>/<appName>/`, parse `LastModified` for retention.
 - **Delete**: `s3.DeleteObject`.
-- **Multipart**: The SDK handles multipart uploads automatically for large objects. No special code needed.
+- **Multipart**: Not handled. The code calls `s3.PutObject` directly (`internal/storage/s3/s3.go`), and `PutObject` does *not* do multipart uploads in `aws-sdk-go-v2` — only `feature/s3/manager.Uploader` does that. This means backups are subject to S3's hard 5 GiB single-`PutObject` size ceiling. Switching to `manager.Uploader` to lift that ceiling is tracked as a separate piece of work, not covered by this document.
 - **Authentication**: Standard AWS credential chain (env vars, `~/.aws/credentials`, IAM role, IRSA). No credentials in backuparr config unless the user wants explicit keys.
 
 ### Configuration
@@ -256,16 +265,22 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
         return fmt.Errorf("failed to read backup: %w", err)
     }
 
-    // 3. Upload to each backend
+    // 3. Upload to each backend sequentially. A failure on one destination does
+    // not stop the others, but every configured destination is a promised copy,
+    // so any failure makes the whole backup a failure for the caller.
+    var failedUploads []string
+
     for _, backend := range backends {
         _, err := backend.Upload(ctx, app.Name(), result.Name, bytes.NewReader(data), int64(len(data)))
         if err != nil {
             log.Printf("[%s] Failed to upload to %s: %v", app.Name(), backend.Name(), err)
+            failedUploads = append(failedUploads, fmt.Sprintf("%s: %v", backend.Name(), err))
             continue
         }
         log.Printf("[%s] Uploaded to %s", app.Name(), backend.Name())
 
-        // 4. Apply retention
+        // 4. Apply retention. Pruning is housekeeping that runs after the backup
+        // is safely stored, so a failure here is logged but does not fail the run.
         deleted, err := storage.ApplyRetention(ctx, backend, app.Name(), retention)
         if err != nil {
             log.Printf("[%s] Retention cleanup failed on %s: %v", app.Name(), backend.Name(), err)
@@ -274,9 +289,18 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
         }
     }
 
+    // A failed upload is a hard failure, not a soft warning: every configured
+    // destination is a promise, so any that didn't get a copy fails the run.
+    if len(failedUploads) > 0 {
+        return fmt.Errorf("upload failed for %d of %d destination(s): %s",
+            len(failedUploads), len(backends), strings.Join(failedUploads, "; "))
+    }
+
     return nil
 }
 ```
+
+This is pinned by `TestRunBackup_UploadFailures` in `cmd/backuparr/main_test.go`, which asserts that any backend upload failure — even when other backends succeed — makes `runBackup` return a non-nil error mentioning the failing backend(s).
 
 ---
 
@@ -300,15 +324,15 @@ For interactive use, `backuparr restore --app sonarr --backend s3` with no `--ba
 ## Implementation Plan
 
 ### Phase 1: Storage Interface + Local Backend
-- Create `storage/` package with interface
-- Refactor existing local backup into `storage/local`
+- Create `internal/storage/` package with interface
+- Refactor existing local backup into `internal/storage/local`
 - Implement `ApplyRetention()`
 - Update `main.go` orchestrator to use backends
 - Update config schema to support `storage:` block
 - Tests for retention logic
 
 ### Phase 2: S3 Backend
-- Implement `storage/s3` using AWS SDK v2
+- Implement `internal/storage/s3` using AWS SDK v2
 - Add `go.mod` dependency
 - Integration test with MinIO container
 - Support custom endpoints for S3-compatible stores

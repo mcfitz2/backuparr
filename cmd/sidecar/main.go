@@ -14,7 +14,8 @@ type config struct {
 	BackupPath      string   // BACKUP_PATH (required) — directory to back up / restore to
 	ExcludePatterns []string // EXCLUDE_PATTERNS — comma-separated glob patterns to exclude
 	APIPort         string   // API_PORT (default "8484") — HTTP listen port
-	APIKey          string   // API_KEY — optional shared secret for X-Api-Key auth
+	APIKey          string   // API_KEY (required unless ALLOW_NO_AUTH=1) — shared secret for X-Api-Key auth
+	AllowNoAuth     bool     // ALLOW_NO_AUTH — explicit opt-in to run without an API key
 
 	// Docker restart (optional)
 	DockerContainer string // DOCKER_CONTAINER — container name/ID to restart
@@ -31,6 +32,7 @@ func loadConfig() (*config, error) {
 		BackupPath:      os.Getenv("BACKUP_PATH"),
 		APIPort:         os.Getenv("API_PORT"),
 		APIKey:          os.Getenv("API_KEY"),
+		AllowNoAuth:     os.Getenv("ALLOW_NO_AUTH") == "1",
 		DockerContainer: os.Getenv("DOCKER_CONTAINER"),
 		DockerHost:      os.Getenv("DOCKER_HOST"),
 		KubePod:         os.Getenv("KUBE_POD"),
@@ -69,6 +71,13 @@ func loadConfig() (*config, error) {
 
 	if cfg.DockerContainer != "" && cfg.KubePod != "" {
 		return nil, fmt.Errorf("DOCKER_CONTAINER and KUBE_POD are mutually exclusive")
+	}
+
+	if cfg.APIKey == "" && !cfg.AllowNoAuth {
+		return nil, fmt.Errorf("API_KEY is required (set ALLOW_NO_AUTH=1 to explicitly run without authentication)")
+	}
+	if cfg.APIKey == "" {
+		log.Printf("[sidecar] *** WARNING: ALLOW_NO_AUTH=1 is set — all endpoints (including /restore and /restart) are UNAUTHENTICATED ***")
 	}
 
 	return cfg, nil

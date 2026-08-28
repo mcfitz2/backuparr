@@ -66,6 +66,40 @@ func TestParse(t *testing.T) {
 			wantApps: 0,
 		},
 		{
+			// Issue #9: an omitted retention block decodes to an all-zero
+			// policy, which deletes every existing backup on the next run.
+			name: "missing retention block is rejected",
+			contents: `appConfigs:
+  - appType: sonarr
+    connection:
+      url: http://localhost:8989
+      apiKey: abc123
+    storage:
+      - type: local
+        path: ./backups
+`,
+			wantErr:     true,
+			wantErrText: "sonarr",
+		},
+		{
+			name: "all-zero retention block is rejected",
+			contents: `appConfigs:
+  - appType: radarr
+    name: radarr-main
+    connection:
+      url: http://localhost:7878
+      apiKey: abc123
+    storage:
+      - type: local
+        path: ./backups
+    retention:
+      keepLast: 0
+      keepDaily: 0
+`,
+			wantErr:     true,
+			wantErrText: "radarr-main",
+		},
+		{
 			name:     "explicitly empty app list",
 			contents: "appConfigs: []\n",
 			wantApps: 0,
@@ -91,6 +125,25 @@ func TestParse(t *testing.T) {
 			}
 			if len(cfg.AppConfigs) != tt.wantApps {
 				t.Errorf("got %d app configs, want %d", len(cfg.AppConfigs), tt.wantApps)
+			}
+		})
+	}
+}
+
+func TestAppConfigName(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AppConfig
+		want string
+	}{
+		{"explicit name wins", AppConfig{Name: "sonarr-4k", AppType: "sonarr"}, "sonarr-4k"},
+		{"falls back to app type", AppConfig{AppType: "radarr"}, "radarr"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AppConfigName(tt.cfg); got != tt.want {
+				t.Errorf("AppConfigName() = %q, want %q", got, tt.want)
 			}
 		})
 	}

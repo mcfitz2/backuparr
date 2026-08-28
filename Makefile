@@ -102,6 +102,7 @@ test-unit:
 # Start MinIO container for S3 tests
 test-s3-up:
 	@echo "Starting MinIO container..."
+	-@docker rm -f minio-test 2>/dev/null
 	@docker run -d --name minio-test \
 		-p 9000:9000 -p 9001:9001 \
 		-e MINIO_ROOT_USER=minioadmin \
@@ -122,11 +123,10 @@ test-s3-down:
 	@echo "Stopping MinIO container..."
 	-@docker rm -f minio-test 2>/dev/null
 
-# Run S3 integration tests (starts MinIO, runs tests, stops MinIO)
+# Run S3 integration tests (starts MinIO, runs tests, stops MinIO regardless of outcome)
 test-s3: test-s3-down test-s3-up
 	@echo "Running S3 integration tests..."
-	set -o pipefail; S3_TEST=1 go test -json -v ./storage/s3/... -timeout 5m 2>&1 | $(GOBIN)/gotestfmt
-	@$(MAKE) test-s3-down
+	set -o pipefail; trap '$(MAKE) test-s3-down' EXIT; S3_TEST=1 go test -json -v ./internal/storage/s3/... -timeout 5m 2>&1 | $(GOBIN)/gotestfmt
 
 # Run sidecar integration tests only
 test-sidecar:

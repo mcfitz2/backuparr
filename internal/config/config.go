@@ -34,11 +34,28 @@ type RetentionPolicy struct {
 	KeepYearly  int `yaml:"keepYearly"`
 }
 
+// isZero reports whether every keepX field is zero, i.e. the policy keeps
+// nothing. An omitted "retention:" block decodes to exactly this value.
+func (p RetentionPolicy) isZero() bool {
+	return p.KeepLast == 0 && p.KeepHourly == 0 && p.KeepDaily == 0 &&
+		p.KeepWeekly == 0 && p.KeepMonthly == 0 && p.KeepYearly == 0
+}
+
 type Connection struct {
 	APIKey   string `yaml:"apiKey"`
 	URL      string `yaml:"url"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+
+	// InsecureSkipVerify controls TLS certificate verification for clients
+	// that support it (currently: truenas). Unset (nil) preserves the
+	// historical default of skipping verification, since home-lab servers
+	// often use self-signed certificates. Set to false to require
+	// verification (optionally combined with CACert).
+	InsecureSkipVerify *bool `yaml:"insecureSkipVerify,omitempty"`
+	// CACert is an optional path to a PEM-encoded CA certificate used to
+	// verify the server's certificate instead of the system trust store.
+	CACert string `yaml:"caCert,omitempty"`
 }
 
 // PostgresOverride allows manually specifying Postgres connection details.
@@ -89,6 +106,15 @@ func Parse(path string) (BackuparrConfig, error) {
 		}
 		return BackuparrConfig{}, fmt.Errorf("error parsing config: %w", err)
 	}
+
+	for _, app := range cfg.AppConfigs {
+		if app.Retention.isZero() {
+			return BackuparrConfig{}, fmt.Errorf(
+				"app %q: retention policy is empty (no keepLast/keepHourly/keepDaily/keepWeekly/keepMonthly/keepYearly set); "+
+					"this would delete every existing backup on the next run, so refusing to load", AppConfigName(app))
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -115,4 +141,13 @@ func StorageConfigName(sc StorageConfig) string {
 		return sc.Name
 	}
 	return sc.Type
+}
+
+// AppConfigName returns the effective name for an app config entry.
+// If a custom name is set it takes precedence; otherwise the app type is used.
+func AppConfigName(app AppConfig) string {
+	if app.Name != "" {
+		return app.Name
+	}
+	return app.AppType
 }
