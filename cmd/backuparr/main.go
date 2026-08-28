@@ -157,8 +157,8 @@ func toStorageRetention(r config.RetentionPolicy) storage.RetentionPolicy {
 	}
 }
 
-func runBackup(ctx context.Context, app backup.Client, backends []storage.Backend, retention config.RetentionPolicy) error {
-	log.Printf("[%s] Starting backup...", app.Name())
+func runBackup(ctx context.Context, app backup.Client, backends []storage.Backend, retention config.RetentionPolicy, logger *log.Logger) error {
+	logger.Printf("[%s] Starting backup...", app.Name())
 
 	result, reader, err := app.Backup(ctx)
 	if err != nil {
@@ -174,7 +174,7 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 		return fmt.Errorf("failed to read backup data: %w", err)
 	}
 
-	log.Printf("[%s] Backup created: %s (%d bytes)", app.Name(), result.Name, len(data))
+	logger.Printf("[%s] Backup created: %s (%d bytes)", app.Name(), result.Name, len(data))
 
 	// Generate consistent filename
 	fileName := storage.FormatBackupName(app.Name(), time.Now())
@@ -189,20 +189,20 @@ func runBackup(ctx context.Context, app backup.Client, backends []storage.Backen
 	for _, backend := range backends {
 		meta, err := backend.Upload(ctx, app.Name(), fileName, bytes.NewReader(data), int64(len(data)))
 		if err != nil {
-			log.Printf("[%s] Failed to upload to %s: %v", app.Name(), backend.Name(), err)
+			logger.Printf("[%s] Failed to upload to %s: %v", app.Name(), backend.Name(), err)
 			failedUploads = append(failedUploads, fmt.Sprintf("%s: %v", backend.Name(), err))
 			continue
 		}
-		log.Printf("[%s] Uploaded to %s: %s (%d bytes)", app.Name(), backend.Name(), meta.FileName, meta.Size)
+		logger.Printf("[%s] Uploaded to %s: %s (%d bytes)", app.Name(), backend.Name(), meta.FileName, meta.Size)
 
 		// Apply retention policy. Pruning is housekeeping that runs after the
 		// backup is safely stored, so a failure here is logged but does not
 		// fail the backup.
 		deleted, err := storage.ApplyRetention(ctx, backend, app.Name(), storageRetention)
 		if err != nil {
-			log.Printf("[%s] Retention cleanup failed on %s: %v", app.Name(), backend.Name(), err)
+			logger.Printf("[%s] Retention cleanup failed on %s: %v", app.Name(), backend.Name(), err)
 		} else if deleted > 0 {
-			log.Printf("[%s] Cleaned up %d old backup(s) from %s", app.Name(), deleted, backend.Name())
+			logger.Printf("[%s] Cleaned up %d old backup(s) from %s", app.Name(), deleted, backend.Name())
 		}
 	}
 
@@ -311,7 +311,7 @@ func runBackupAll() {
 			continue
 		}
 
-		if err := runBackup(ctx, client, backends, appCfg.Retention); err != nil {
+		if err := runBackup(ctx, client, backends, appCfg.Retention, log.Default()); err != nil {
 			log.Printf("[%s] Backup failed: %v", name, err)
 			failed = append(failed, name)
 		}

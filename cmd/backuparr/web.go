@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -33,8 +35,10 @@ var wsUpgrader = websocket.Upgrader{
 	},
 }
 
-var logCaptureMu sync.Mutex
-
+// jobLogWriter is the io.Writer backing a job's dedicated *log.Logger. Each
+// job gets its own logger instead of redirecting the process-global one, so
+// concurrent jobs no longer serialize on a shared mutex and unrelated log
+// output from the rest of the process never leaks into a job's log.
 type jobLogWriter struct {
 	server *webServer
 	jobID  string
@@ -110,7 +114,23 @@ type backupJob struct {
 	Request   triggerBackupRequest
 	Results   []triggerBackupResult
 	Logs      []string
+
+	// LogsTruncated is the running count of log lines dropped to keep Logs
+	// bounded. Zero means nothing has been dropped.
+	LogsTruncated int
 }
+
+const (
+	// maxJobLogLines caps how many log lines a single job retains; once
+	// exceeded, the oldest lines are dropped and replaced with a marker.
+	maxJobLogLines = 1000
+
+	// maxCompletedJobs and completedJobMaxAge bound s.jobs so a long-running
+	// process doesn't accumulate job state forever. Running jobs are never
+	// evicted regardless of age.
+	maxCompletedJobs   = 50
+	completedJobMaxAge = 24 * time.Hour
+)
 
 func runWebUI() {
 	fs := flag.NewFlagSet("web", flag.ExitOnError)
@@ -323,8 +343,18 @@ func (s *webServer) handleBackupWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func newJobID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand failing indicates a broken OS entropy source; there is
+		// no sane fallback that keeps IDs unguessable, so surface it loudly.
+		panic(fmt.Sprintf("backuparr: failed to generate job id: %v", err))
+	}
+	return hex.EncodeToString(buf)
+}
+
 func (s *webServer) startBackupJob(req triggerBackupRequest) *backupJob {
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
+	id := newJobID()
 	job := &backupJob{
 		ID:        id,
 		StartedAt: time.Now().UTC(),
@@ -339,22 +369,22 @@ func (s *webServer) startBackupJob(req triggerBackupRequest) *backupJob {
 	s.mu.Unlock()
 
 	go s.executeBackupJob(id)
-	return s.snapshotJob(job)
+
+	// Read the snapshot back through getJob rather than the local job
+	// pointer: the goroutine above may already be mutating that same
+	// *backupJob concurrently, and getJob is the one path that snapshots
+	// under s.mu.
+	snapshot, _ := s.getJob(id)
+	return snapshot
 }
 
 func (s *webServer) executeBackupJob(id string) {
+	logger := log.New(jobLogWriter{server: s, jobID: id}, "", log.LstdFlags)
+
 	if err := preflightCheck(s.cfg); err != nil {
 		s.finishJob(id, false, []triggerBackupResult{}, []string{fmt.Sprintf("Preflight failed: %v", err)})
 		return
 	}
-
-	logCaptureMu.Lock()
-	baseLogWriter := log.Writer()
-	log.SetOutput(io.MultiWriter(baseLogWriter, jobLogWriter{server: s, jobID: id}))
-	defer func() {
-		log.SetOutput(baseLogWriter)
-		logCaptureMu.Unlock()
-	}()
 
 	targetApp := ""
 	s.mu.RLock()
@@ -393,7 +423,7 @@ func (s *webServer) executeBackupJob(id string) {
 			continue
 		}
 
-		if err := runBackup(ctx, client, backends, appCfg.Retention); err != nil {
+		if err := runBackup(ctx, client, backends, appCfg.Retention, logger); err != nil {
 			results = append(results, triggerBackupResult{App: name, OK: false, Status: "failed", Error: err.Error()})
 			s.appendJobLog(id, fmt.Sprintf("[%s] failed: %v", name, err))
 			continue
@@ -433,7 +463,7 @@ func (s *webServer) appendJobLog(id, line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if j, ok := s.jobs[id]; ok {
-		j.Logs = append(j.Logs, fmt.Sprintf("%s %s", time.Now().UTC().Format(time.RFC3339), line))
+		appendCappedLog(j, fmt.Sprintf("%s %s", time.Now().UTC().Format(time.RFC3339), line))
 	}
 }
 
@@ -441,7 +471,7 @@ func (s *webServer) appendJobRawLog(id, line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if j, ok := s.jobs[id]; ok {
-		j.Logs = append(j.Logs, line)
+		appendCappedLog(j, line)
 	}
 }
 
@@ -455,8 +485,72 @@ func (s *webServer) finishJob(id string, success bool, results []triggerBackupRe
 		j.Results = results
 		j.EndedAt = &now
 		for _, line := range logs {
-			j.Logs = append(j.Logs, fmt.Sprintf("%s %s", now.Format(time.RFC3339), line))
+			appendCappedLog(j, fmt.Sprintf("%s %s", now.Format(time.RFC3339), line))
 		}
+	}
+	s.evictStaleJobsLocked()
+}
+
+// appendCappedLog appends line to j.Logs, keeping at most maxJobLogLines
+// entries. Once older lines are dropped, the oldest surviving entry is
+// replaced with a running count of everything discarded so far, so the log
+// never grows unbounded but the user can tell output was dropped. Callers
+// must hold s.mu for writing.
+func appendCappedLog(j *backupJob, line string) {
+	content := j.Logs
+	if j.LogsTruncated > 0 && len(content) > 0 {
+		content = content[1:] // drop the stale marker; it's regenerated below
+	}
+	content = append(content, line)
+
+	const limit = maxJobLogLines - 1 // reserve one slot for the marker
+	if drop := len(content) - limit; drop > 0 {
+		j.LogsTruncated += drop
+		content = content[drop:]
+	}
+
+	if j.LogsTruncated > 0 {
+		marker := fmt.Sprintf("... %d earlier line(s) truncated ...", j.LogsTruncated)
+		j.Logs = append([]string{marker}, content...)
+		return
+	}
+	j.Logs = content
+}
+
+// evictStaleJobsLocked drops completed jobs older than completedJobMaxAge and,
+// if more than maxCompletedJobs remain, the oldest of those too. Running jobs
+// are never evicted. Callers must hold s.mu for writing.
+func (s *webServer) evictStaleJobsLocked() {
+	now := time.Now()
+	type candidate struct {
+		id      string
+		endedAt time.Time
+	}
+	var completed []candidate
+
+	for id, j := range s.jobs {
+		if j.Running {
+			continue
+		}
+		endedAt := j.StartedAt
+		if j.EndedAt != nil {
+			endedAt = *j.EndedAt
+		}
+		if now.Sub(endedAt) > completedJobMaxAge {
+			delete(s.jobs, id)
+			continue
+		}
+		completed = append(completed, candidate{id: id, endedAt: endedAt})
+	}
+
+	if len(completed) <= maxCompletedJobs {
+		return
+	}
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].endedAt.Before(completed[j].endedAt)
+	})
+	for _, c := range completed[:len(completed)-maxCompletedJobs] {
+		delete(s.jobs, c.id)
 	}
 }
 
@@ -467,10 +561,13 @@ func (s *webServer) getJob(id string) (*backupJob, bool) {
 	if !ok {
 		return nil, false
 	}
-	return s.snapshotJob(job), true
+	return snapshotJobLocked(job), true
 }
 
-func (s *webServer) snapshotJob(job *backupJob) *backupJob {
+// snapshotJobLocked copies a job's mutable fields into a fresh *backupJob so
+// callers can read it without holding s.mu afterward. The caller must hold
+// s.mu (for reading or writing) for the duration of this call.
+func snapshotJobLocked(job *backupJob) *backupJob {
 	logs := make([]string, len(job.Logs))
 	copy(logs, job.Logs)
 	results := make([]triggerBackupResult, len(job.Results))
@@ -489,14 +586,15 @@ func (s *webServer) snapshotJob(job *backupJob) *backupJob {
 	}
 
 	return &backupJob{
-		ID:        job.ID,
-		StartedAt: job.StartedAt,
-		EndedAt:   endedAt,
-		Running:   job.Running,
-		Success:   success,
-		Request:   job.Request,
-		Results:   results,
-		Logs:      logs,
+		ID:            job.ID,
+		StartedAt:     job.StartedAt,
+		EndedAt:       endedAt,
+		Running:       job.Running,
+		Success:       success,
+		Request:       job.Request,
+		Results:       results,
+		Logs:          logs,
+		LogsTruncated: job.LogsTruncated,
 	}
 }
 
