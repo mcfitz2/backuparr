@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -400,5 +403,181 @@ func TestTryRestart_NoneConfigured(t *testing.T) {
 	result := tryRestart(cfg)
 	if result.Attempted {
 		t.Error("should not attempt restart when nothing is configured")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loadConfig — API key requirement
+// ---------------------------------------------------------------------------
+
+// withEnv sets env vars for the duration of the test and restores the
+// previous values (or absence) afterward.
+func withEnv(t *testing.T, kv map[string]string) {
+	t.Helper()
+	for k, v := range kv {
+		old, had := os.LookupEnv(k)
+		os.Setenv(k, v)
+		t.Cleanup(func() {
+			if had {
+				os.Setenv(k, old)
+			} else {
+				os.Unsetenv(k)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_RequiresAPIKeyByDefault(t *testing.T) {
+	withEnv(t, map[string]string{
+		"BACKUP_PATH":   t.TempDir(),
+		"API_KEY":       "",
+		"ALLOW_NO_AUTH": "",
+	})
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("loadConfig() succeeded with no API_KEY and no ALLOW_NO_AUTH opt-in, want error")
+	}
+	if !strings.Contains(err.Error(), "API_KEY") {
+		t.Errorf("error = %q, want mention of API_KEY", err)
+	}
+}
+
+func TestLoadConfig_AllowNoAuthOptIn(t *testing.T) {
+	withEnv(t, map[string]string{
+		"BACKUP_PATH":   t.TempDir(),
+		"API_KEY":       "",
+		"ALLOW_NO_AUTH": "1",
+	})
+
+	var logBuf bytes.Buffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	})
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() with ALLOW_NO_AUTH=1 failed: %v", err)
+	}
+	if !cfg.AllowNoAuth {
+		t.Error("AllowNoAuth = false, want true")
+	}
+	if cfg.APIKey != "" {
+		t.Errorf("APIKey = %q, want empty", cfg.APIKey)
+	}
+	if !strings.Contains(strings.ToUpper(logBuf.String()), "WARNING") {
+		t.Errorf("expected a startup warning to be logged, got: %q", logBuf.String())
+	}
+}
+
+func TestLoadConfig_WithAPIKeySucceeds(t *testing.T) {
+	withEnv(t, map[string]string{
+		"BACKUP_PATH":   t.TempDir(),
+		"API_KEY":       "dummy-test-key",
+		"ALLOW_NO_AUTH": "",
+	})
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() with API_KEY set failed: %v", err)
+	}
+	if cfg.APIKey != "dummy-test-key" {
+		t.Errorf("APIKey = %q, want %q", cfg.APIKey, "dummy-test-key")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /restore — auth enforcement
+// ---------------------------------------------------------------------------
+
+// newRestoreRequest builds a multipart POST to /api/v1/restore carrying a
+// minimal (empty) ZIP as the "backup" field.
+func newRestoreRequest(t *testing.T, apiKey string) *http.Request {
+	t.Helper()
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip.Close: %v", err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("backup", "backup.zip")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err := part.Write(zipBuf.Bytes()); err != nil {
+		t.Fatalf("write zip part: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("multipart Close: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/restore", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if apiKey != "" {
+		req.Header.Set("X-Api-Key", apiKey)
+	}
+	return req
+}
+
+func TestHandlerRestore_Unauthorized(t *testing.T) {
+	cfg := &config{BackupPath: t.TempDir()}
+	handler := authMiddleware("supersecretkey", handleRestore(cfg))
+
+	rr := httptest.NewRecorder()
+	req := newRestoreRequest(t, "")
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestHandlerRestore_WithValidKey(t *testing.T) {
+	cfg := &config{BackupPath: t.TempDir()}
+	handler := authMiddleware("supersecretkey", handleRestore(cfg))
+
+	rr := httptest.NewRecorder()
+	req := newRestoreRequest(t, "supersecretkey")
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200, body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandlerRestore_WrongKeySameLength(t *testing.T) {
+	cfg := &config{BackupPath: t.TempDir()}
+	// "supersecretkey" and "zzzzzzzzzzzzzz" are both 14 bytes.
+	handler := authMiddleware("supersecretkey", handleRestore(cfg))
+
+	rr := httptest.NewRecorder()
+	req := newRestoreRequest(t, "zzzzzzzzzzzzzz")
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_WrongKeySameLength(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rr := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Api-Key", "zzzzzz") // same length as "secret"
+	authMiddleware("secret", inner)(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rr.Code)
 	}
 }

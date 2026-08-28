@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -143,17 +145,28 @@ func handleRestart(cfg *config) http.HandlerFunc {
 }
 
 // authMiddleware checks the X-Api-Key header if an API key is configured.
+// An empty apiKey means the operator explicitly opted into ALLOW_NO_AUTH;
+// loadConfig refuses to start otherwise.
 func authMiddleware(apiKey string, next http.HandlerFunc) http.HandlerFunc {
 	if apiKey == "" {
-		return next // no auth configured
+		return next // ALLOW_NO_AUTH opt-in
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Api-Key") != apiKey {
+		if !constantTimeEqual(r.Header.Get("X-Api-Key"), apiKey) {
 			httpError(w, http.StatusUnauthorized, "invalid or missing API key")
 			return
 		}
 		next(w, r)
 	}
+}
+
+// constantTimeEqual compares two strings without leaking their length or
+// content through timing. Hashing both sides to a fixed-length digest first
+// means the ConstantTimeCompare call always runs on equal-length input.
+func constantTimeEqual(a, b string) bool {
+	ah := sha256.Sum256([]byte(a))
+	bh := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ah[:], bh[:]) == 1
 }
 
 // restoreMessage generates a human-readable summary of a restore operation.
