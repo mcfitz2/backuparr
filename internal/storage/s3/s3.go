@@ -47,12 +47,16 @@ func New(ctx context.Context, cfg Config) (*S3Backend, error) {
 		return nil, fmt.Errorf("s3: bucket is required")
 	}
 
-	prefix := cfg.Prefix
-	if prefix == "" {
+	// Normalize to the exact form path.Join (used by objectKey and List)
+	// would produce for this prefix, so confineKey's HasPrefix check always
+	// matches: strip leading/trailing slashes, then path.Clean to collapse
+	// internal "//" and resolve "." — a prefix of "/", "//", or "." would
+	// otherwise trim/clean down to "" or "." without falling back to the
+	// "backuparr" default, and confineKey would reject every key.
+	prefix := path.Clean(strings.Trim(cfg.Prefix, "/"))
+	if prefix == "" || prefix == "." {
 		prefix = "backuparr"
 	}
-	// Ensure prefix doesn\'t have leading/trailing slashes
-	prefix = strings.Trim(prefix, "/")
 
 	// Build AWS config options
 	var opts []func(*awsconfig.LoadOptions) error

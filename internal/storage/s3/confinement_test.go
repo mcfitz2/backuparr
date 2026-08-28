@@ -67,6 +67,40 @@ func TestConfinement_DownloadRejectsOutOfPrefixKey(t *testing.T) {
 	}
 }
 
+// TestConfinement_PrefixNormalization asserts that New normalizes every
+// prefix shape that would otherwise trim/clean down to something confineKey
+// can't accept — e.g. a prefix consisting only of slashes trims to "" and
+// would make confineKey reject every key — so the resulting backend's own
+// keys always pass its own confineKey check.
+func TestConfinement_PrefixNormalization(t *testing.T) {
+	ctx := context.Background()
+
+	rawPrefixes := []string{
+		"",      // empty -> default
+		"/",     // slash only -> default
+		"//",    // multiple slashes only -> default
+		"///",   // same
+		".",     // cleans to "." -> default
+		"./",    // trims to "." -> default
+		"a//b",  // internal double slash, collapsed by path.Join/Clean
+		"/a/b/", // ordinary leading/trailing slashes
+		"backuparr",
+	}
+
+	for _, raw := range rawPrefixes {
+		t.Run("prefix="+raw, func(t *testing.T) {
+			backend, err := New(ctx, Config{Bucket: "test-bucket", Prefix: raw})
+			if err != nil {
+				t.Fatalf("New(Prefix=%q) failed: %v", raw, err)
+			}
+			key := backend.objectKey("sonarr", "sonarr_2026-01-01T000000Z.zip")
+			if err := backend.confineKey(key); err != nil {
+				t.Errorf("confineKey(%q) = %v, want nil (backend.prefix=%q from raw config %q)", key, err, backend.prefix, raw)
+			}
+		})
+	}
+}
+
 // TestConfinement_ListThenActKeysPassConfinement proves that every key shape
 // List can produce (<prefix>/<appName>/<fileName>) satisfies confineKey, so
 // legitimate List -> Download/Delete round trips are never rejected.
