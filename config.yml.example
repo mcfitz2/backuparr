@@ -62,6 +62,12 @@ appConfigs:
   #   connection:
   #     apiKey: "1-your-truenas-api-key"   # Created in TrueNAS UI: Credentials → API Keys
   #     url: "http://192.168.1.136"        # TrueNAS web UI URL
+  #     # NOTE: an http:// url sends the API key in cleartext on every request.
+  #     # Use https:// where your TrueNAS instance supports it.
+  #     # insecureSkipVerify: true    # default: skip TLS certificate verification
+  #     #                             # (home-lab TrueNAS instances often use self-signed certs).
+  #     #                             # Set to false to require verification.
+  #     # caCert: "/path/to/ca.pem"  # optional: verify against this CA instead of the system trust store
   #   retention:
   #     keepLast: 5
   #     keepDaily: 7
