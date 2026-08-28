@@ -46,6 +46,16 @@ type Connection struct {
 	URL      string `yaml:"url"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+
+	// InsecureSkipVerify controls TLS certificate verification for clients
+	// that support it (currently: truenas). Unset (nil) preserves the
+	// historical default of skipping verification, since home-lab servers
+	// often use self-signed certificates. Set to false to require
+	// verification (optionally combined with CACert).
+	InsecureSkipVerify *bool `yaml:"insecureSkipVerify,omitempty"`
+	// CACert is an optional path to a PEM-encoded CA certificate used to
+	// verify the server's certificate instead of the system trust store.
+	CACert string `yaml:"caCert,omitempty"`
 }
 
 // PostgresOverride allows manually specifying Postgres connection details.

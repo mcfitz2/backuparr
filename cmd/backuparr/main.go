@@ -80,7 +80,10 @@ func createClient(cfg config.AppConfig) (backup.Client, error) {
 	case "prowlarr":
 		return prowlarr.NewProwlarrClient(cfg.Connection.URL, cfg.Connection.APIKey, cfg.Connection.Username, cfg.Connection.Password)
 	case "truenas":
-		return truenas.NewClient(cfg.Connection.URL, cfg.Connection.APIKey), nil
+		return truenas.NewClient(cfg.Connection.URL, cfg.Connection.APIKey, truenas.TLSOptions{
+			InsecureSkipVerify: cfg.Connection.InsecureSkipVerify,
+			CACertPath:         cfg.Connection.CACert,
+		}), nil
 	case "sidecar":
 		name := cfg.Name
 		if name == "" {

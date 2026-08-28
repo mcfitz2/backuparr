@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,6 +36,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -47,18 +49,71 @@ import (
 // Verify Client satisfies the backup.Client interface at compile time.
 var _ backup.Client = (*Client)(nil)
 
+// TLSOptions controls certificate verification for HTTPS/WSS connections to
+// TrueNAS. The zero value preserves the historical default: verification is
+// skipped, since home-lab TrueNAS instances commonly present self-signed
+// certificates. Users who can verify may opt in by setting
+// InsecureSkipVerify to a non-nil false, optionally supplying CACertPath.
+type TLSOptions struct {
+	// InsecureSkipVerify explicitly enables (true) or disables (false)
+	// certificate verification. nil means "unset", which keeps the default
+	// (skip verification) unless CACertPath is also set.
+	InsecureSkipVerify *bool
+	// CACertPath, if set, is the path to a PEM-encoded CA certificate used
+	// to verify the TrueNAS server's certificate instead of the system
+	// trust store.
+	CACertPath string
+}
+
 // Client implements backup.Client for TrueNAS Scale systems.
 type Client struct {
 	baseURL string // e.g. "http://192.168.1.136"
 	apiKey  string // TrueNAS API key (created in UI under Credentials > API Keys)
+	tlsOpts TLSOptions
 }
 
 // NewClient creates a TrueNAS backup client.
-func NewClient(baseURL, apiKey string) *Client {
+func NewClient(baseURL, apiKey string, tlsOpts TLSOptions) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
+		tlsOpts: tlsOpts,
 	}
+}
+
+// tlsConfig builds the *tls.Config shared by all three HTTPS/WSS call sites
+// (WebSocket dial, download, upload). Default behavior (no TLS options set)
+// is unchanged from before: verification is skipped for compatibility with
+// home-lab self-signed certificates. Setting InsecureSkipVerify to false
+// (optionally with CACertPath) opts into verification.
+func (c *Client) tlsConfig() (*tls.Config, error) {
+	insecure := true
+	switch {
+	case c.tlsOpts.InsecureSkipVerify != nil:
+		insecure = *c.tlsOpts.InsecureSkipVerify
+	case c.tlsOpts.CACertPath != "":
+		// Supplying a CA cert without an explicit InsecureSkipVerify is an
+		// unambiguous signal that verification should be enabled.
+		insecure = false
+	}
+
+	if insecure {
+		return &tls.Config{InsecureSkipVerify: true}, nil //nolint:gosec // opt-in default preserves existing home-lab self-signed-cert behavior
+	}
+
+	cfg := &tls.Config{}
+	if c.tlsOpts.CACertPath != "" {
+		pemData, err := os.ReadFile(c.tlsOpts.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert %s: %w", c.tlsOpts.CACertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			return nil, fmt.Errorf("parse CA cert %s: no certificates found", c.tlsOpts.CACertPath)
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
 }
 
 // Name returns the application identifier used for storage paths and logging.
@@ -114,7 +169,7 @@ func (c *Client) Backup(ctx context.Context) (*backup.BackupResult, io.ReadClose
 		return nil, nil, fmt.Errorf("parse download path: %w", err)
 	}
 
-	log.Printf("[truenas] Config save job %d started, downloading from %s", jobID, dlPath)
+	log.Printf("[truenas] Config save job %d started, downloading from %s", jobID, redactQuery(dlPath))
 
 	// Fetch the backup file over HTTP. The download URL contains an embedded
 	// auth_token so no additional authentication is needed.
@@ -162,7 +217,7 @@ func (c *Client) Restore(ctx context.Context, backup io.Reader) error {
 	// Poll core.get_jobs until the upload job reaches a terminal state.
 	// We can't rely on core.job_wait because it is itself a job method and
 	// returns immediately via JSON-RPC before the target job finishes.
-	if err := c.waitForJob(ws, jobID); err != nil {
+	if err := c.waitForJob(ctx, ws, jobID); err != nil {
 		return fmt.Errorf("config.upload job %d failed: %w", jobID, err)
 	}
 
@@ -183,10 +238,15 @@ type jobInfo struct {
 
 // waitForJob polls core.get_jobs until the given job reaches a terminal state
 // (SUCCESS, FAILED, or ABORTED). It logs progress updates along the way.
-func (c *Client) waitForJob(ws *wsClient, jobID int64) error {
+// It returns promptly with ctx.Err() if ctx is cancelled or times out.
+func (c *Client) waitForJob(ctx context.Context, ws *wsClient, jobID int64) error {
 	var lastPct float64
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		// core.get_jobs accepts query-filters; [["id", "=", jobID]] returns just our job.
 		var jobs []jobInfo
 		if err := ws.call("core.get_jobs", &jobs, [][]any{{"id", "=", jobID}}); err != nil {
@@ -212,9 +272,22 @@ func (c *Client) waitForJob(ws *wsClient, jobID int64) error {
 			return fmt.Errorf("job was aborted")
 		}
 
-		// Poll every 2 seconds.
-		time.Sleep(2 * time.Second)
+		// Poll every 2 seconds, but return promptly if ctx is cancelled.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
+}
+
+// redactQuery strips the query string from a URL path so secrets embedded
+// in it (e.g. TrueNAS's download auth_token) are never logged.
+func redactQuery(path string) string {
+	if i := strings.IndexByte(path, '?'); i != -1 {
+		return path[:i]
+	}
+	return path
 }
 
 // wsURL returns the WebSocket URL derived from the base HTTP URL.
@@ -278,10 +351,14 @@ func (c *Client) dialWebSocket(ctx context.Context) (*wsClient, error) {
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	// Support self-signed certs for HTTPS TrueNAS instances
+	// TLS policy (verification skipped by default; see TLSOptions).
 	u, _ := url.Parse(c.baseURL)
 	if u != nil && u.Scheme == "https" {
-		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // home lab servers often use self-signed certs
+		tlsCfg, err := c.tlsConfig()
+		if err != nil {
+			return nil, fmt.Errorf("tls config: %w", err)
+		}
+		dialer.TLSClientConfig = tlsCfg
 	}
 
 	wsURL := c.wsURL()
@@ -352,7 +429,11 @@ func (c *Client) httpDownload(ctx context.Context, downloadURL string) (io.ReadC
 	// Match the WebSocket TLS policy for the download request.
 	u, _ := url.Parse(downloadURL)
 	if u != nil && u.Scheme == "https" {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+		tlsCfg, err := c.tlsConfig()
+		if err != nil {
+			return nil, 0, fmt.Errorf("tls config: %w", err)
+		}
+		transport.TLSClientConfig = tlsCfg
 	}
 
 	httpClient := &http.Client{
@@ -424,7 +505,11 @@ func (c *Client) httpUpload(ctx context.Context, file io.Reader) (int64, error) 
 	transport := &http.Transport{}
 	u, _ := url.Parse(uploadURL)
 	if u != nil && u.Scheme == "https" {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+		tlsCfg, err := c.tlsConfig()
+		if err != nil {
+			return 0, fmt.Errorf("tls config: %w", err)
+		}
+		transport.TLSClientConfig = tlsCfg
 	}
 	httpClient := &http.Client{
 		Timeout:   5 * time.Minute,
