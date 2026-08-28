@@ -48,8 +48,9 @@ $EDITOR config.yml                      # add your app(s) and storage
 ./backuparr web --listen :8080          # browse/trigger backups in a UI
 ```
 
-By default backuparr reads `/config/config.yml`; override with the
-`BACKUPARR_CONFIG` environment variable. Running via Docker:
+backuparr resolves the config path as: `BACKUPARR_CONFIG` if set, else
+`/config/config.yml` if that file exists (the Docker default), else
+`./config.yml` (what the quick start above relies on). Running via Docker:
 
 ```sh
 docker run -v /path/to/config.yml:/config/config.yml backuparr backup
