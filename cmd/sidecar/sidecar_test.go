@@ -3,6 +3,8 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -343,6 +345,12 @@ func TestHandlerBackup(t *testing.T) {
 	wantLen := strconv.Itoa(len(body))
 	if got := rr.Header().Get("Content-Length"); got != wantLen {
 		t.Errorf("Content-Length = %q, want %q", got, wantLen)
+	}
+
+	wantSum := sha256.Sum256(body)
+	wantSumHex := hex.EncodeToString(wantSum[:])
+	if got := rr.Header().Get("X-Backup-Sha256"); got != wantSumHex {
+		t.Errorf("X-Backup-Sha256 = %q, want %q (sha256 of the actual response body)", got, wantSumHex)
 	}
 
 	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))

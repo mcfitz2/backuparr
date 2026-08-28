@@ -57,7 +57,11 @@ func handleBackup(cfg *config) http.HandlerFunc {
 		defer os.Remove(tmp.Name())
 		defer tmp.Close()
 
-		stats, err := createBackup(cfg.BackupPath, cfg.ExcludePatterns, tmp)
+		// Hash while writing (tee into the hasher) rather than re-reading the
+		// temp file afterward — avoids a second full pass over a possibly
+		// large archive on a memory-constrained sidecar.
+		sum := sha256.New()
+		stats, err := createBackup(cfg.BackupPath, cfg.ExcludePatterns, io.MultiWriter(tmp, sum))
 		if err != nil {
 			log.Printf("[sidecar] Backup failed: %v", err)
 			httpError(w, http.StatusInternalServerError, fmt.Sprintf("backup failed: %v", err))
@@ -71,12 +75,6 @@ func handleBackup(cfg *config) http.HandlerFunc {
 			return
 		}
 
-		sum := sha256.New()
-		if _, err := io.Copy(sum, tmp); err != nil {
-			log.Printf("[sidecar] Backup failed: %v", err)
-			httpError(w, http.StatusInternalServerError, fmt.Sprintf("failed to checksum backup: %v", err))
-			return
-		}
 		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 			log.Printf("[sidecar] Backup failed: %v", err)
 			httpError(w, http.StatusInternalServerError, fmt.Sprintf("failed to rewind backup: %v", err))
