@@ -1,12 +1,25 @@
 # oapi-codegen configuration for Prowlarr API client generation
+#
+# openapi.json is vendored from Prowlarr/Prowlarr@17e12c074efb6a00e4a85312b557a77ac692da4e
+# (develop, fetched 2026-08-27): src/Prowlarr.Api.V1/openapi.json
+#
+# The upstream spec has no operationId fields, so oapi-codegen derives them
+# from method+path (e.g. "GET /api/v1/command/{id}" -> GetApiV1CommandId).
+# The operationId values below have been added to the vendored spec to match
+# that derivation for the operations backuparr actually calls (see client.go),
+# so include-operation-ids can prune everything else.
 package: prowlarr
 generate:
   client: true
   models: true
 output: client.gen.go
 output-options:
-  skip-prune: true
-  exclude-tags:
-    - StaticResource
-    - Authentication
-    - ApiInfo
+  include-operation-ids:
+    - GetApiV1CommandId
+    - GetApiV1ConfigHost
+    - GetApiV1SystemBackup
+    - PostApiV1Command
+    - PostApiV1SystemRestart
+    # Tag is not called by client.go, but TagResource is used directly by
+    # integration-tests/restore_validation_test.go.
+    - GetApiV1Tag

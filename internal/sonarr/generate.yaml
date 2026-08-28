@@ -1,12 +1,30 @@
 # oapi-codegen configuration for Sonarr API client generation
+#
+# openapi.json is vendored from Sonarr/Sonarr@053dfb0afa14b6025efb36bd16cc907043fd8dca
+# (develop, fetched 2026-08-27): src/Sonarr.Api.V3/openapi.json
+#
+# The upstream spec has no operationId fields, so oapi-codegen derives them
+# from method+path (e.g. "GET /api/v3/command/{id}" -> GetApiV3CommandId).
+# The operationId values below have been added to the vendored spec to match
+# that derivation for the operations backuparr actually calls (see client.go),
+# so include-operation-ids can prune everything else. The vendored spec also
+# adds x-enum-varnames to CommandStatus to pin its constant names (client.go
+# uses CommandStatusCompleted etc.), independent of oapi-codegen's automatic
+# enum-name-conflict detection, which depends on which other enums happen to
+# survive pruning.
 package: sonarr
 generate:
   client: true
   models: true
 output: client.gen.go
 output-options:
-  skip-prune: true
-  exclude-tags:
-    - StaticResource
-    - Authentication
-    - ApiInfo
+  include-operation-ids:
+    - GetApiV3CommandId
+    - GetApiV3ConfigHost
+    - GetApiV3SystemBackup
+    - GetApiV3SystemStatus
+    - PostApiV3Command
+    - PostApiV3SystemRestart
+    # Series is not called by client.go, but SeriesResource / AddSeriesOptions
+    # are used directly by integration-tests/restore_validation_test.go.
+    - GetApiV3Series
