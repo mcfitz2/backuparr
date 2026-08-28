@@ -402,6 +402,66 @@ func TestIsRetryableStatus(t *testing.T) {
 	}
 }
 
+func TestRetryTransport_ExhaustedRetryBodyReadable(t *testing.T) {
+	wantBody := "service unavailable, try again later"
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{status: 503, body: wantBody},
+			{status: 503, body: wantBody},
+			{status: 503, body: wantBody},
+			{status: 503, body: wantBody},
+		},
+	}
+
+	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 503 {
+		t.Errorf("expected status 503, got %d", resp.StatusCode)
+	}
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if string(got) != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, string(got))
+	}
+}
+
+func TestRetryTransport_ExhaustedRetryBodyTruncated(t *testing.T) {
+	longBody := strings.Repeat("x", maxBufferedErrorBody+1024)
+	mock := &mockTransport{
+		responses: []mockResponse{
+			{status: 503, body: longBody},
+			{status: 503, body: longBody},
+			{status: 503, body: longBody},
+			{status: 503, body: longBody},
+		},
+	}
+
+	rt := &RetryTransport{Base: mock, MaxRetries: 3, BaseDelay: 10 * time.Millisecond}
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if len(got) != maxBufferedErrorBody {
+		t.Errorf("expected buffered body to be truncated to %d bytes, got %d", maxBufferedErrorBody, len(got))
+	}
+}
+
 // bodyCapturingTransport captures request bodies and delegates to inner transport.
 type bodyCapturingTransport struct {
 	inner  http.RoundTripper
