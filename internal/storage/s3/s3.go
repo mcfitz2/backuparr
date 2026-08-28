@@ -47,12 +47,16 @@ func New(ctx context.Context, cfg Config) (*S3Backend, error) {
 		return nil, fmt.Errorf("s3: bucket is required")
 	}
 
-	prefix := cfg.Prefix
-	if prefix == "" {
+	// Normalize to the exact form path.Join (used by objectKey and List)
+	// would produce for this prefix, so confineKey's HasPrefix check always
+	// matches: strip leading/trailing slashes, then path.Clean to collapse
+	// internal "//" and resolve "." — a prefix of "/", "//", or "." would
+	// otherwise trim/clean down to "" or "." without falling back to the
+	// "backuparr" default, and confineKey would reject every key.
+	prefix := path.Clean(strings.Trim(cfg.Prefix, "/"))
+	if prefix == "" || prefix == "." {
 		prefix = "backuparr"
 	}
-	// Ensure prefix doesn\'t have leading/trailing slashes
-	prefix = strings.Trim(prefix, "/")
 
 	// Build AWS config options
 	var opts []func(*awsconfig.LoadOptions) error
@@ -118,9 +122,23 @@ func (b *S3Backend) objectKey(appName, fileName string) string {
 	return path.Join(b.prefix, appName, fileName)
 }
 
+// confineKey rejects any key that does not fall under this backend's
+// configured prefix, before it is used in an API call. appName/fileName
+// values containing ".." can otherwise cause objectKey (via path.Join's
+// cleaning) to escape the prefix.
+func (b *S3Backend) confineKey(key string) error {
+	if !strings.HasPrefix(key, b.prefix+"/") {
+		return fmt.Errorf("s3: key %q is outside configured prefix %q", key, b.prefix)
+	}
+	return nil
+}
+
 // Upload stores backup data as an S3 object.
 func (b *S3Backend) Upload(ctx context.Context, appName string, fileName string, data io.Reader, size int64) (*storage.BackupMetadata, error) {
 	key := b.objectKey(appName, fileName)
+	if err := b.confineKey(key); err != nil {
+		return nil, err
+	}
 
 	input := &s3.PutObjectInput{
 		Bucket:       aws.String(b.bucket),
@@ -147,6 +165,10 @@ func (b *S3Backend) Upload(ctx context.Context, appName string, fileName string,
 
 // Download retrieves a backup object from S3. Caller must close the reader.
 func (b *S3Backend) Download(ctx context.Context, key string) (io.ReadCloser, *storage.BackupMetadata, error) {
+	if err := b.confineKey(key); err != nil {
+		return nil, nil, err
+	}
+
 	output, err := b.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(key),
@@ -180,6 +202,9 @@ func (b *S3Backend) Download(ctx context.Context, key string) (io.ReadCloser, *s
 // List returns all backups for the given app, sorted newest-first.
 func (b *S3Backend) List(ctx context.Context, appName string) ([]storage.BackupMetadata, error) {
 	prefix := path.Join(b.prefix, appName) + "/"
+	if err := b.confineKey(prefix); err != nil {
+		return nil, err
+	}
 
 	var backups []storage.BackupMetadata
 	paginator := s3.NewListObjectsV2Paginator(b.client, &s3.ListObjectsV2Input{
@@ -226,6 +251,10 @@ func (b *S3Backend) List(ctx context.Context, appName string) ([]storage.BackupM
 
 // Delete removes a backup object from S3.
 func (b *S3Backend) Delete(ctx context.Context, key string) error {
+	if err := b.confineKey(key); err != nil {
+		return err
+	}
+
 	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(key),
